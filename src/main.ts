@@ -20,6 +20,7 @@ import medicalNewsRoutes from './routes/medicalNews.routes';
 
 import { runMedicalNewsJob } from './jobs/medicalNews.job';
 import { runTikTokTrendsJob } from './jobs/tiktokTrends.job';
+import { runInstagramSyncJob } from './jobs/instagramSync.job';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
@@ -52,6 +53,10 @@ async function bootstrap(): Promise<void> {
   cron.schedule(env.TIKTOK_CRON_SCHEDULE, () => {
     runTikTokTrendsJob().catch((err) => console.error('[tiktokTrends] Job error:', err));
   });
+
+  cron.schedule('0 0 * * *', () => {
+    runInstagramSyncJob().catch((err) => console.error('[instagramSync] Job error:', err));
+  }, { timezone: 'America/Sao_Paulo' });
 
   const port = parseInt(env.PORT);
   app.listen(port, () => {

@@ -12,10 +12,9 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   FRONTEND_URL: z.string().default('http://localhost:3000'),
-  META_APP_ID: z.string().optional(),
-  META_APP_SECRET: z.string().optional(),
-  META_VERIFY_TOKEN: z.string().optional(),
   TIKTOK_APIFY_TOKEN: z.string().optional(),
+  INSTAGRAM_APIFY_TOKEN: z.string().optional(),
+  GPT_KEY: z.string().optional(),
   TIKTOK_CRON_SCHEDULE: z.string().default('0 */4 * * *'),
   NEWS_RSS_CRON_SCHEDULE: z.string().default('0 */2 * * *'),
 });
