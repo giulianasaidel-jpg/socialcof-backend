@@ -13,6 +13,11 @@ export interface IPost extends Document {
   forwards: number;
   reach: number;
   impressions: number;
+  postUrl?: string;
+  thumbnailUrl?: string;
+  videoUrl?: string;
+  transcript?: string;
+  carouselImages: string[];
   syncedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -32,6 +37,11 @@ const postSchema = new Schema<IPost>(
     forwards: { type: Number, default: 0 },
     reach: { type: Number, default: 0 },
     impressions: { type: Number, default: 0 },
+    postUrl: { type: String },
+    thumbnailUrl: { type: String },
+    videoUrl: { type: String },
+    transcript: { type: String },
+    carouselImages: { type: [String], default: [] },
     syncedAt: { type: Date },
   },
   { timestamps: true },

@@ -6,6 +6,7 @@ import {
   getAccountStats,
   scrapeAccountProfile,
   scrapeAccountPosts,
+  scrapeAccountReels,
   analyzeAccountContent,
   discoverAccount,
   createAccount,
@@ -27,6 +28,7 @@ router.patch('/:id', updateAccount);
 router.delete('/:id', requireAdmin, deleteAccount);
 router.post('/:id/scrape/profile', scrapeAccountProfile);
 router.post('/:id/scrape/posts', scrapeAccountPosts);
+router.post('/:id/scrape/reels', scrapeAccountReels);
 router.post('/:id/analyze', analyzeAccountContent);
 router.post('/:id/sync', syncAccount);
 

@@ -3,6 +3,9 @@ import { InstagramAccount } from '../models/InstagramAccount';
 import { InstagramSyncLog } from '../models/InstagramSyncLog';
 import { Post } from '../models/Post';
 import { scrapeProfile, scrapeRecentPosts, toPostFormat } from '../services/apifyInstagram';
+import { uploadImageFromUrl, uploadCarouselImages } from '../services/s3';
+import { processReel } from '../services/videoProcessor';
+import { analyseImage, analyseCarousel } from '../services/visionAnalysis';
 import { analyzeAccount } from '../services/gptAnalysis';
 
 /**
@@ -161,6 +164,8 @@ export async function getAccountStats(req: Request, res: Response): Promise<void
       saves: p.saves,
       reach: p.reach,
       impressions: p.impressions,
+      postUrl: p.postUrl ?? null,
+      thumbnailUrl: p.thumbnailUrl ?? null,
     })),
   });
 }
@@ -220,8 +225,31 @@ export async function scrapeAccountPosts(req: Request, res: Response): Promise<v
     const posts = await scrapeRecentPosts(account.handle, limit);
 
     const upserted = await Promise.all(
-      posts.map((post) => {
+      posts.map(async (post) => {
         const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
+        const thumbnailUrl =
+          post.displayUrl && post.type !== 'Video'
+            ? await uploadImageFromUrl(post.displayUrl, `instagram/${account.handle}/${post.id}.jpg`).catch((err) => {
+                console.error(`[s3] upload failed for ${post.id}:`, err.message);
+                return null;
+              })
+            : null;
+
+        const carouselImages =
+          post.type === 'Sidecar' && post.carouselDisplayUrls.length
+            ? await uploadCarouselImages(post.carouselDisplayUrls, account.handle, post.id)
+            : [];
+
+        const transcript = await (async () => {
+          if (post.type === 'Sidecar' && carouselImages.length) {
+            return analyseCarousel(carouselImages).catch(() => null);
+          }
+          if (post.type === 'Image' && thumbnailUrl) {
+            return analyseImage(thumbnailUrl).catch(() => null);
+          }
+          return null;
+        })();
+
         return Post.findOneAndUpdate(
           { instagramPostId: post.id },
           {
@@ -233,6 +261,10 @@ export async function scrapeAccountPosts(req: Request, res: Response): Promise<v
               format: toPostFormat(post.type),
               likes: post.likesCount,
               comments: post.commentsCount,
+              postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
+              ...(thumbnailUrl && { thumbnailUrl }),
+              ...(carouselImages.length && { carouselImages }),
+              ...(transcript && { transcript }),
               syncedAt: new Date(),
             },
           },
@@ -261,10 +293,70 @@ export async function scrapeAccountPosts(req: Request, res: Response): Promise<v
         alt: post.alt,
         ownerUsername: post.ownerUsername,
         isPinned: post.isPinned,
+        thumbnailUrl: upserted.find((u) => u?.instagramPostId === post.id)?.thumbnailUrl ?? null,
+        carouselImages: upserted.find((u) => u?.instagramPostId === post.id)?.carouselImages ?? [],
       })),
     });
   } catch (err) {
     res.status(502).json({ message: 'Posts scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+}
+
+/**
+ * POST /instagram-accounts/:id/scrape/reels — Downloads, compresses and transcribes Reels via Whisper, then saves to DB and S3.
+ */
+export async function scrapeAccountReels(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) {
+    res.status(404).json({ message: 'Account not found' });
+    return;
+  }
+
+  const limit = Math.min(20, parseInt((req.query.limit as string) ?? '10'));
+
+  try {
+    const posts = await scrapeRecentPosts(account.handle, limit);
+    const reels = posts.filter((p) => p.type === 'Video' && p.videoUrl);
+
+    const results = await Promise.all(
+      reels.map(async (post) => {
+        try {
+          const { s3VideoUrl, transcript } = await processReel(post.videoUrl!, account.handle, post.id);
+          const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
+
+          await Post.findOneAndUpdate(
+            { instagramPostId: post.id },
+            {
+              $set: {
+                accountId: account._id,
+                instagramPostId: post.id,
+                title,
+                postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
+                format: 'Reels',
+                likes: post.likesCount,
+                comments: post.commentsCount,
+                postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
+                ...(s3VideoUrl && { videoUrl: s3VideoUrl }),
+                ...(transcript && { transcript }),
+                syncedAt: new Date(),
+              },
+            },
+            { upsert: true, new: true },
+          );
+
+          return { id: post.id, shortCode: post.shortCode, s3VideoUrl, transcript, status: 'ok' };
+        } catch (err) {
+          return { id: post.id, shortCode: post.shortCode, status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' };
+        }
+      }),
+    );
+
+    account.lastSyncAt = new Date();
+    await account.save();
+
+    res.json({ total: reels.length, reels: results });
+  } catch (err) {
+    res.status(502).json({ message: 'Reels scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
 }
 
@@ -320,6 +412,25 @@ export async function syncAccount(req: Request, res: Response): Promise<void> {
 
     for (const post of posts) {
       const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
+      const thumbnailUrl =
+        post.displayUrl && post.type !== 'Video'
+          ? await uploadImageFromUrl(post.displayUrl, `instagram/${account.handle}/${post.id}.jpg`).catch(() => null)
+          : null;
+
+      const carouselImages =
+        post.type === 'Sidecar' && post.carouselDisplayUrls.length
+          ? await uploadCarouselImages(post.carouselDisplayUrls, account.handle, post.id)
+          : [];
+
+      const transcript = await (async () => {
+        if (post.type === 'Sidecar' && carouselImages.length) {
+          return analyseCarousel(carouselImages).catch(() => null);
+        }
+        if (post.type === 'Image' && thumbnailUrl) {
+          return analyseImage(thumbnailUrl).catch(() => null);
+        }
+        return null;
+      })();
 
       await Post.findOneAndUpdate(
         { instagramPostId: post.id },
@@ -328,10 +439,14 @@ export async function syncAccount(req: Request, res: Response): Promise<void> {
             accountId: account._id,
             instagramPostId: post.id,
             title,
-            postedAt: new Date(post.timestamp),
+            postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
             format: toPostFormat(post.type),
             likes: post.likesCount,
             comments: post.commentsCount,
+            postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
+            ...(thumbnailUrl && { thumbnailUrl }),
+            ...(carouselImages.length && { carouselImages }),
+            ...(transcript && { transcript }),
             syncedAt: new Date(),
           },
         },

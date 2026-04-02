@@ -15,6 +15,8 @@ const envSchema = z.object({
   TIKTOK_APIFY_TOKEN: z.string().optional(),
   INSTAGRAM_APIFY_TOKEN: z.string().optional(),
   GPT_KEY: z.string().optional(),
+  AWS_S3_BUCKET: z.string().optional(),
+  AWS_REGION: z.string().default('us-east-1'),
   TIKTOK_CRON_SCHEDULE: z.string().default('0 */4 * * *'),
   NEWS_RSS_CRON_SCHEDULE: z.string().default('0 */2 * * *'),
 });

@@ -2,6 +2,10 @@ import { Request, Response } from 'express';
 import { Draft } from '../models/Draft';
 import { Product } from '../models/Product';
 import { InstagramAccount } from '../models/InstagramAccount';
+import { MedicalNews } from '../models/MedicalNews';
+import { generateDraft as generateDraftContent } from '../services/postGenerator';
+import { scrapeUrl } from '../services/urlScraper';
+import type { TemplateType } from '../models/Draft';
 
 /**
  * Maps a Draft document to the API response shape.
@@ -17,10 +21,14 @@ function toResponse(
     accountId: accountExternalId,
     title: draft.title,
     type: draft.type,
-    basedOnUrl: draft.basedOnUrl,
+    templateType: draft.templateType ?? null,
+    basedOnUrl: draft.basedOnUrl ?? null,
     caption: draft.caption,
+    hashtags: draft.hashtags ?? [],
+    slides: draft.slides ?? [],
     status: draft.status,
     createdBy: draft.createdBy?.toString(),
+    generatedAt: draft.generatedAt ?? null,
     createdAt: draft.createdAt,
   };
 }
@@ -118,4 +126,110 @@ export async function deleteDraft(req: Request, res: Response): Promise<void> {
     return;
   }
   res.status(204).send();
+}
+
+/**
+ * POST /drafts/generate — Uses GPT-4o to generate a full draft (caption, hashtags, slides) from a topic and template type.
+ */
+export async function generateDraft(req: Request, res: Response): Promise<void> {
+  const {
+    accountId,
+    productId,
+    templateType,
+    topic,
+    tone,
+    slideCount,
+    referenceCaption,
+    sourceUrl,
+    sourceNewsId,
+    basedOnUrl,
+  } = req.body as {
+    accountId?: string;
+    productId?: string;
+    templateType?: TemplateType;
+    topic?: string;
+    tone?: string;
+    slideCount?: number;
+    referenceCaption?: string;
+    sourceUrl?: string;
+    sourceNewsId?: string;
+    basedOnUrl?: string;
+  };
+
+  if (!accountId || !productId || !templateType || !topic) {
+    res.status(400).json({ message: 'accountId, productId, templateType and topic are required' });
+    return;
+  }
+
+  const validTemplates: TemplateType[] = [
+    'twitter-quote',
+    'carousel-tips',
+    'carousel-numbered',
+    'carousel-before-after',
+    'carousel-story',
+    'static-announcement',
+  ];
+
+  if (!validTemplates.includes(templateType)) {
+    res.status(400).json({ message: `templateType must be one of: ${validTemplates.join(', ')}` });
+    return;
+  }
+
+  const [product, account] = await Promise.all([
+    Product.findOne({ externalId: productId }),
+    InstagramAccount.findOne({ externalId: accountId }),
+  ]);
+
+  if (!product) { res.status(400).json({ message: 'Product not found' }); return; }
+  if (!account) { res.status(400).json({ message: 'Instagram account not found' }); return; }
+
+  let sourceContent: string | undefined;
+  let resolvedSourceUrl = basedOnUrl;
+
+  try {
+    if (sourceNewsId) {
+      const news = await MedicalNews.findById(sourceNewsId);
+      if (!news) { res.status(400).json({ message: 'MedicalNews not found' }); return; }
+      sourceContent = `${news.title}\n\n${news.summary}`;
+      resolvedSourceUrl = resolvedSourceUrl ?? news.url;
+    } else if (sourceUrl) {
+      const scraped = await scrapeUrl(sourceUrl);
+      sourceContent = `${scraped.title}\n\n${scraped.text}`;
+      resolvedSourceUrl = resolvedSourceUrl ?? sourceUrl;
+    }
+  } catch (err) {
+    res.status(502).json({ message: 'Failed to fetch source content', error: err instanceof Error ? err.message : 'Unknown error' });
+    return;
+  }
+
+  try {
+    const generated = await generateDraftContent({
+      templateType,
+      topic,
+      accountHandle: account.handle,
+      tone,
+      slideCount,
+      referenceCaption,
+      sourceContent,
+    });
+
+    const draft = await Draft.create({
+      productId: product._id,
+      accountId: account._id,
+      createdBy: req.user!.userId,
+      title: generated.title,
+      type: generated.format,
+      templateType: generated.templateType,
+      caption: generated.caption,
+      hashtags: generated.hashtags,
+      slides: generated.slides,
+      basedOnUrl: resolvedSourceUrl ?? null,
+      status: 'Rascunho',
+      generatedAt: new Date(),
+    });
+
+    res.status(201).json(toResponse(draft, productId, accountId));
+  } catch (err) {
+    res.status(502).json({ message: 'Generation failed', error: err instanceof Error ? err.message : 'Unknown error' });
+  }
 }

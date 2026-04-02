@@ -9,6 +9,7 @@ import { InstagramAccount } from '../models/InstagramAccount';
 function toResponse(post: InstanceType<typeof Post>, externalId: string) {
   return {
     id: post._id.toString(),
+    instagramPostId: post.instagramPostId ?? null,
     accountId: externalId,
     title: post.title,
     postedAt: post.postedAt,
@@ -16,8 +17,16 @@ function toResponse(post: InstanceType<typeof Post>, externalId: string) {
     likes: post.likes,
     comments: post.comments,
     saves: post.saves,
+    reach: post.reach,
+    impressions: post.impressions,
     reposts: post.reposts,
     forwards: post.forwards,
+    postUrl: post.postUrl ?? null,
+    thumbnailUrl: post.thumbnailUrl ?? null,
+    videoUrl: post.videoUrl ?? null,
+    transcript: post.transcript ?? null,
+    carouselImages: post.carouselImages ?? [],
+    syncedAt: post.syncedAt ?? null,
   };
 }
 

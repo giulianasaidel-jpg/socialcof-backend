@@ -32,6 +32,8 @@ export interface ApifyInstagramPost {
   alt: string | null;
   ownerUsername: string | null;
   isPinned: boolean;
+  videoUrl: string | null;
+  carouselDisplayUrls: string[];
 }
 
 function getClient(): ApifyClient {
@@ -77,29 +79,61 @@ export async function scrapeRecentPosts(handle: string, limit = 50): Promise<Api
   });
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
-  return items
-    .filter((item) => {
-      const p = item as Record<string, unknown>;
-      return p.ownerUsername !== undefined || p.ownerId !== undefined;
-    })
-    .map((item) => {
-      const p = item as Record<string, unknown>;
-      return {
-        id: (p.id ?? p.shortCode) as string,
-        shortCode: (p.shortCode ?? '') as string,
-        caption: (p.caption ?? '') as string,
-        likesCount: (p.likesCount ?? 0) as number,
-        commentsCount: (p.commentsCount ?? 0) as number,
-        timestamp: (p.timestamp ?? null) as string | null,
-        type: (p.type ?? 'Image') as 'Image' | 'Video' | 'Sidecar',
-        url: (p.url ?? `https://instagram.com/p/${p.shortCode}`) as string,
-        displayUrl: (p.displayUrl ?? null) as string | null,
-        hashtags: ((p.hashtags as string[]) ?? []),
-        alt: (p.alt ?? null) as string | null,
-        ownerUsername: (p.ownerUsername ?? null) as string | null,
-        isPinned: (p.isPinned ?? false) as boolean,
-      };
-    });
+  const mainItems: Record<string, unknown>[] = [];
+  const childMap = new Map<string, string[]>();
+
+  for (const item of items) {
+    const p = item as Record<string, unknown>;
+    if (typeof p.ownerUsername === 'string' && typeof p.id === 'string') {
+      mainItems.push(p);
+    } else if (typeof p.displayUrl === 'string') {
+      const parentRef = (p.shortCode ?? p.parentId ?? p.parentShortCode) as string | undefined;
+      if (parentRef) {
+        const existing = childMap.get(parentRef) ?? [];
+        childMap.set(parentRef, [...existing, p.displayUrl]);
+      }
+    }
+  }
+
+  return mainItems.map((p) => {
+    const type = (p.type ?? 'Image') as 'Image' | 'Video' | 'Sidecar';
+    const shortCode = (p.shortCode ?? '') as string;
+
+    let carouselDisplayUrls: string[] = [];
+    if (type === 'Sidecar') {
+      const embedded = p.images as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(embedded) && embedded.length > 0) {
+        carouselDisplayUrls = embedded.map((img) => img.displayUrl as string).filter(Boolean);
+      }
+      if (!carouselDisplayUrls.length) {
+        const childPosts = p.childPosts as Array<Record<string, unknown>> | undefined;
+        if (Array.isArray(childPosts) && childPosts.length > 0) {
+          carouselDisplayUrls = childPosts.map((img) => img.displayUrl as string).filter(Boolean);
+        }
+      }
+      if (!carouselDisplayUrls.length) {
+        carouselDisplayUrls = childMap.get(shortCode) ?? [];
+      }
+    }
+
+    return {
+      id: (p.id ?? shortCode) as string,
+      shortCode,
+      caption: (p.caption ?? '') as string,
+      likesCount: (p.likesCount ?? 0) as number,
+      commentsCount: (p.commentsCount ?? 0) as number,
+      timestamp: (p.timestamp ?? null) as string | null,
+      type,
+      url: (p.url ?? `https://instagram.com/p/${shortCode}`) as string,
+      displayUrl: (p.displayUrl ?? null) as string | null,
+      hashtags: ((p.hashtags as string[]) ?? []),
+      alt: (p.alt ?? null) as string | null,
+      ownerUsername: (p.ownerUsername ?? null) as string | null,
+      isPinned: (p.isPinned ?? false) as boolean,
+      videoUrl: (p.videoUrl ?? p.videoSrc ?? null) as string | null,
+      carouselDisplayUrls,
+    };
+  });
 }
 
 /**
