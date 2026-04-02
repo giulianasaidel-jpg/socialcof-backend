@@ -1,5 +1,18 @@
 node_modules/
 dist/
+
+# environment — never commit
 .env
+.env.*
+!.env.example
+
+# logs
 *.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
 .DS_Store
+
+# build cache
+*.tsbuildinfo
