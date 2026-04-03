@@ -3,7 +3,7 @@ import { InstagramAccount } from '../models/InstagramAccount';
 import { InstagramSyncLog } from '../models/InstagramSyncLog';
 import { Post } from '../models/Post';
 import { scrapeProfile, scrapeRecentPosts, toPostFormat } from '../services/apifyInstagram';
-import { uploadImageFromUrl, uploadCarouselImages } from '../services/s3';
+import { uploadImageFromUrl, uploadCarouselImages, uploadBuffer } from '../services/s3';
 import { processReel } from '../services/videoProcessor';
 import { analyseImage, analyseCarousel } from '../services/visionAnalysis';
 import { analyzeAccount } from '../services/gptAnalysis';
@@ -23,6 +23,9 @@ function toResponse(account: InstanceType<typeof InstagramAccount>) {
     tokenExpiresAt: account.tokenExpiresAt,
     ingestEnabled: account.ingestEnabled,
     workspace: account.workspace,
+    profilePicS3Url: account.profilePicS3Url ?? null,
+    brandColors: account.brandColors ?? [],
+    referenceImages: account.referenceImages ?? [],
   };
 }
 
@@ -477,4 +480,87 @@ export async function syncAccount(req: Request, res: Response): Promise<void> {
 
     res.status(502).json({ message: 'Sync failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
+}
+
+/**
+ * POST /instagram-accounts/:id/branding/profile-pic — Uploads a profile picture to S3 and saves the URL.
+ */
+export async function uploadProfilePic(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const file = req.file;
+  if (!file) { res.status(400).json({ message: 'No file uploaded (field: file)' }); return; }
+
+  const ext = file.mimetype.split('/')[1] ?? 'jpg';
+  const key = `branding/${account.handle}/profile-pic.${ext}`;
+
+  const url = await uploadBuffer(file.buffer, key, file.mimetype);
+  if (!url) { res.status(502).json({ message: 'S3 upload failed or AWS_S3_BUCKET not configured' }); return; }
+
+  account.profilePicS3Url = url;
+  await account.save();
+
+  res.json({ profilePicS3Url: url });
+}
+
+/**
+ * PATCH /instagram-accounts/:id/branding/colors — Sets the brand color palette (array of hex strings).
+ */
+export async function updateBrandColors(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const { colors } = req.body as { colors?: unknown };
+  if (!Array.isArray(colors) || colors.some((c) => typeof c !== 'string')) {
+    res.status(400).json({ message: 'colors must be an array of strings' });
+    return;
+  }
+
+  account.brandColors = colors as string[];
+  await account.save();
+
+  res.json({ brandColors: account.brandColors });
+}
+
+/**
+ * POST /instagram-accounts/:id/branding/reference-images — Uploads one or more reference images to S3.
+ * Appends the new URLs to the existing list.
+ */
+export async function uploadReferenceImages(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const files = req.files as Express.Multer.File[] | undefined;
+  if (!files?.length) { res.status(400).json({ message: 'No files uploaded (field: files)' }); return; }
+
+  const uploaded = await Promise.all(
+    files.map(async (file, i) => {
+      const ext = file.mimetype.split('/')[1] ?? 'jpg';
+      const key = `branding/${account.handle}/ref_${Date.now()}_${i}.${ext}`;
+      return uploadBuffer(file.buffer, key, file.mimetype);
+    }),
+  );
+
+  const newUrls = uploaded.filter((u): u is string => u !== null);
+  account.referenceImages = [...account.referenceImages, ...newUrls];
+  await account.save();
+
+  res.json({ added: newUrls.length, referenceImages: account.referenceImages });
+}
+
+/**
+ * DELETE /instagram-accounts/:id/branding/reference-images — Removes a reference image URL from the list.
+ */
+export async function deleteReferenceImage(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const { url } = req.body as { url?: string };
+  if (!url) { res.status(400).json({ message: 'url is required' }); return; }
+
+  account.referenceImages = account.referenceImages.filter((u) => u !== url);
+  await account.save();
+
+  res.json({ referenceImages: account.referenceImages });
 }

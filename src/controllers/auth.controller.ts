@@ -1,9 +1,13 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import { User } from '../models/User';
 import { env } from '../config/env';
 import { JwtPayload } from '../middleware/auth';
+
+const ALLOWED_DOMAIN = 'grupomedcof.com.br';
+const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID);
 
 const refreshTokenStore = new Map<string, string>();
 
@@ -29,6 +33,11 @@ export async function login(req: Request, res: Response): Promise<void> {
 
   const user = await User.findOne({ email: email.toLowerCase() });
   if (!user) {
+    res.status(401).json({ message: 'Invalid credentials' });
+    return;
+  }
+
+  if (!user.passwordHash) {
     res.status(401).json({ message: 'Invalid credentials' });
     return;
   }
@@ -96,6 +105,79 @@ export function logout(req: Request, res: Response): void {
     refreshTokenStore.delete(refreshToken);
   }
   res.status(204).send();
+}
+
+/**
+ * POST /auth/google — Verifies a Google ID token, enforces the grupomedcof.com.br domain,
+ * finds or creates the user, and returns access and refresh tokens.
+ */
+export async function googleLogin(req: Request, res: Response): Promise<void> {
+  const { idToken } = req.body;
+
+  if (!idToken) {
+    res.status(400).json({ message: 'idToken is required' });
+    return;
+  }
+
+  let ticket;
+  try {
+    ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: env.GOOGLE_CLIENT_ID,
+    });
+  } catch {
+    res.status(401).json({ message: 'Invalid Google token' });
+    return;
+  }
+
+  const googlePayload = ticket.getPayload();
+  if (!googlePayload?.email || !googlePayload.sub) {
+    res.status(401).json({ message: 'Invalid Google token payload' });
+    return;
+  }
+
+  const { email, sub: googleId } = googlePayload;
+
+  if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
+    res.status(403).json({ message: `Only ${ALLOWED_DOMAIN} accounts are allowed` });
+    return;
+  }
+
+  let user = await User.findOne({ email: email.toLowerCase() });
+
+  if (!user) {
+    user = await User.create({
+      email: email.toLowerCase(),
+      googleId,
+      role: 'viewer',
+      allowedInstagramAccountIds: [],
+    });
+  } else if (!user.googleId) {
+    user.googleId = googleId;
+    await user.save();
+  }
+
+  const payload: JwtPayload = {
+    userId: user._id.toString(),
+    role: user.role,
+    allowedInstagramAccountIds: user.allowedInstagramAccountIds,
+  };
+
+  const accessToken = signAccessToken(payload);
+  const refreshToken = signRefreshToken(payload);
+
+  refreshTokenStore.set(refreshToken, user._id.toString());
+
+  res.json({
+    accessToken,
+    refreshToken,
+    user: {
+      id: user._id.toString(),
+      email: user.email,
+      role: user.role,
+      allowedInstagramAccountIds: user.allowedInstagramAccountIds,
+    },
+  });
 }
 
 /**

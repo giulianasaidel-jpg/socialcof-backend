@@ -115,6 +115,25 @@ export async function uploadVideoFromFile(filePath: string, key: string): Promis
 }
 
 /**
+ * Uploads a raw Buffer directly to S3 and returns the permanent URL.
+ * Skips the upload if the key already exists.
+ */
+export async function uploadBuffer(buffer: Buffer, key: string, contentType: string): Promise<string | null> {
+  if (!env.AWS_S3_BUCKET) return null;
+
+  const bucket = env.AWS_S3_BUCKET;
+  const publicUrl = `https://${bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+
+  if (await exists(bucket, key)) return publicUrl;
+
+  await getClient().send(
+    new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer, ContentType: contentType }),
+  );
+
+  return publicUrl;
+}
+
+/**
  * Uploads all carousel slide images to S3 and returns the permanent URLs.
  * Slides that fail to upload are silently omitted from the result.
  */

@@ -17,6 +17,7 @@ const envSchema = z.object({
   GPT_KEY: z.string().optional(),
   AWS_S3_BUCKET: z.string().optional(),
   AWS_REGION: z.string().default('us-east-1'),
+  GOOGLE_CLIENT_ID: z.string().min(1),
   TIKTOK_CRON_SCHEDULE: z.string().default('0 */4 * * *'),
   NEWS_RSS_CRON_SCHEDULE: z.string().default('0 */2 * * *'),
 });

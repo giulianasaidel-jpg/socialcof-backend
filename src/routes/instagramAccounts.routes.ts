@@ -13,7 +13,12 @@ import {
   updateAccount,
   deleteAccount,
   syncAccount,
+  uploadProfilePic,
+  updateBrandColors,
+  uploadReferenceImages,
+  deleteReferenceImage,
 } from '../controllers/instagramAccounts.controller';
+import { uploadSingle, uploadMultiple } from '../middleware/upload';
 
 const router = Router();
 
@@ -31,5 +36,9 @@ router.post('/:id/scrape/posts', scrapeAccountPosts);
 router.post('/:id/scrape/reels', scrapeAccountReels);
 router.post('/:id/analyze', analyzeAccountContent);
 router.post('/:id/sync', syncAccount);
+router.post('/:id/branding/profile-pic', uploadSingle, uploadProfilePic);
+router.patch('/:id/branding/colors', updateBrandColors);
+router.post('/:id/branding/reference-images', uploadMultiple, uploadReferenceImages);
+router.delete('/:id/branding/reference-images', deleteReferenceImage);
 
 export default router;

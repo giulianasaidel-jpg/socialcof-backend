@@ -17,6 +17,7 @@ import referencePostsRoutes from './routes/referencePosts.routes';
 import adminRoutes from './routes/admin.routes';
 import tiktokRoutes from './routes/tiktok.routes';
 import medicalNewsRoutes from './routes/medicalNews.routes';
+import twitterPostsRoutes from './routes/twitterPosts.routes';
 
 import { runMedicalNewsJob } from './jobs/medicalNews.job';
 import { runTikTokTrendsJob } from './jobs/tiktokTrends.job';
@@ -43,6 +44,7 @@ async function bootstrap(): Promise<void> {
   app.use('/admin', adminRoutes);
   app.use('/tiktok', tiktokRoutes);
   app.use('/medical-news', medicalNewsRoutes);
+  app.use('/twitter-posts', twitterPostsRoutes);
 
   app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 

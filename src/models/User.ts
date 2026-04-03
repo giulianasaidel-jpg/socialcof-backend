@@ -2,7 +2,8 @@ import { Schema, model, Document } from 'mongoose';
 
 export interface IUser extends Document {
   email: string;
-  passwordHash: string;
+  passwordHash?: string;
+  googleId?: string;
   role: 'admin' | 'editor' | 'viewer';
   allowedInstagramAccountIds: string[];
   createdAt: Date;
@@ -12,7 +13,8 @@ export interface IUser extends Document {
 const userSchema = new Schema<IUser>(
   {
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String, required: false },
+    googleId: { type: String, required: false, unique: true, sparse: true },
     role: { type: String, enum: ['admin', 'editor', 'viewer'], required: true },
     allowedInstagramAccountIds: [{ type: String }],
   },

@@ -14,6 +14,9 @@ export interface IInstagramAccount extends Document {
   scopes: string[];
   ingestEnabled: boolean;
   lastSyncAt?: Date;
+  profilePicS3Url?: string;
+  brandColors: string[];
+  referenceImages: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -37,6 +40,9 @@ const instagramAccountSchema = new Schema<IInstagramAccount>(
     scopes: [{ type: String }],
     ingestEnabled: { type: Boolean, default: true },
     lastSyncAt: { type: Date },
+    profilePicS3Url: { type: String },
+    brandColors: { type: [String], default: [] },
+    referenceImages: { type: [String], default: [] },
   },
   { timestamps: true },
 );
