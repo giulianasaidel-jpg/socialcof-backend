@@ -31,10 +31,10 @@ function toResponse(post: InstanceType<typeof Post>, externalId: string) {
 }
 
 /**
- * GET /posts — Lists posts with pagination and filters by accountId, dateFrom, dateTo, format.
+ * GET /posts — Lists posts with pagination and filters by accountId, workspace, dateFrom, dateTo, format.
  */
 export async function listPosts(req: Request, res: Response): Promise<void> {
-  const { accountId, dateFrom, dateTo, format, page = '1', limit = '50' } = req.query as Record<string, string>;
+  const { accountId, workspace, dateFrom, dateTo, format, page = '1', limit = '50' } = req.query as Record<string, string>;
 
   const filter: Record<string, unknown> = {};
 
@@ -45,6 +45,13 @@ export async function listPosts(req: Request, res: Response): Promise<void> {
       return;
     }
     filter.accountId = account._id;
+  } else if (workspace) {
+    const accounts = await InstagramAccount.find({ workspace }, { _id: 1 });
+    if (!accounts.length) {
+      res.json({ data: [], total: 0, page: 1, limit: Number(limit) });
+      return;
+    }
+    filter.accountId = { $in: accounts.map((a) => a._id) };
   }
 
   if (dateFrom || dateTo) {
@@ -60,7 +67,13 @@ export async function listPosts(req: Request, res: Response): Promise<void> {
   const skip = (pageNum - 1) * limitNum;
 
   const [posts, total] = await Promise.all([
-    Post.find(filter).sort({ postedAt: -1 }).skip(skip).limit(limitNum),
+    Post.aggregate([
+      { $match: filter },
+      { $addFields: { _hasTranscript: { $cond: [{ $gt: ['$transcript', ''] }, 1, 0] } } },
+      { $sort: { _hasTranscript: -1, postedAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNum },
+    ]),
     Post.countDocuments(filter),
   ]);
 

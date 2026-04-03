@@ -144,3 +144,46 @@ export function toPostFormat(type: ApifyInstagramPost['type']): 'Reels' | 'Carro
   if (type === 'Video') return 'Reels';
   return 'Estático';
 }
+
+export interface ApifyInstagramStory {
+  id: string;
+  mediaType: 'image' | 'video';
+  displayUrl: string | null;
+  videoUrl: string | null;
+  timestamp: string | null;
+  ownerUsername: string | null;
+}
+
+/**
+ * Scrapes the current public stories for an Instagram handle.
+ * Uses the `seemuapps/instagram-story-scraper` actor.
+ * Output: one dataset item per username with a nested `stories` array.
+ */
+export async function scrapeStories(handle: string): Promise<ApifyInstagramStory[]> {
+  const client = getClient();
+  const run = await client.actor('seemuapps/instagram-story-scraper').call({ usernames: [handle] });
+  const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+  const profileRecord = items[0] as Record<string, unknown> | undefined;
+  if (!profileRecord) return [];
+
+  const rawStories = (profileRecord.stories ?? []) as Array<Record<string, unknown>>;
+
+  return rawStories.map((s) => {
+    const isVideo = s.mediaType === 'video';
+    const mediaUrl = (s.mediaUrl ?? null) as string | null;
+    const rawTimestamp = s.timestamp;
+    const timestamp = typeof rawTimestamp === 'number'
+      ? new Date(rawTimestamp * 1000).toISOString()
+      : typeof rawTimestamp === 'string' ? rawTimestamp : null;
+
+    return {
+      id: (s.storyId ?? s.id ?? '') as string,
+      mediaType: isVideo ? 'video' : 'image',
+      displayUrl: isVideo ? null : mediaUrl,
+      videoUrl: isVideo ? mediaUrl : null,
+      timestamp,
+      ownerUsername: handle,
+    };
+  });
+}

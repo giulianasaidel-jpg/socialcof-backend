@@ -50,6 +50,7 @@ REGRAS DOS SLIDES:
 - PROIBIDO usar hashtags nos slides
 - PROIBIDO usar emojis em excesso (máximo 1 por slide, opcional)
 - Cada slide deve entregar valor real — sem frases genéricas como "é muito importante saber disso"
+- PROIBIDO mencionar concorrentes da MedCOF: Medway, MedGrupo, Hardwork Medicina ou qualquer outra empresa de preparação para residência médica
 
 LEGENDA DO POST (campo "caption"):
 - Texto para publicar no Instagram acompanhando o carrossel

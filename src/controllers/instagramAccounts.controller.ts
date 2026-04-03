@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
 import { InstagramAccount } from '../models/InstagramAccount';
 import { InstagramSyncLog } from '../models/InstagramSyncLog';
+import { InstagramStory } from '../models/InstagramStory';
 import { Post } from '../models/Post';
-import { scrapeProfile, scrapeRecentPosts, toPostFormat } from '../services/apifyInstagram';
+import { scrapeProfile, scrapeRecentPosts, scrapeStories, toPostFormat } from '../services/apifyInstagram';
 import { uploadImageFromUrl, uploadCarouselImages, uploadBuffer } from '../services/s3';
 import { processReel } from '../services/videoProcessor';
 import { analyseImage, analyseCarousel } from '../services/visionAnalysis';
@@ -479,6 +480,81 @@ export async function syncAccount(req: Request, res: Response): Promise<void> {
     });
 
     res.status(502).json({ message: 'Sync failed', error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+}
+
+/**
+ * POST /instagram-accounts/:id/scrape/stories — Scrapes current stories via Apify, uploads media to S3, and transcribes content.
+ */
+export async function scrapeAccountStories(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) {
+    res.status(404).json({ message: 'Account not found' });
+    return;
+  }
+
+  try {
+    const stories = await scrapeStories(account.handle);
+    const syncedAt = new Date();
+    const expiresAt = new Date(syncedAt.getTime() + 24 * 60 * 60 * 1000);
+
+    const results = await Promise.all(
+      stories.map(async (story) => {
+        try {
+          let thumbnailUrl: string | null = null;
+          let s3VideoUrl: string | null = null;
+          let transcript: string | null = null;
+
+          if (story.mediaType === 'image' && story.displayUrl) {
+            thumbnailUrl = await uploadImageFromUrl(
+              story.displayUrl,
+              `instagram/${account.handle}/stories/${story.id}.jpg`,
+            ).catch(() => null);
+
+            const imageForAnalysis = thumbnailUrl ?? story.displayUrl;
+            transcript = await analyseImage(imageForAnalysis).catch(() => null);
+          }
+
+          if (story.mediaType === 'video' && story.videoUrl) {
+            const processed = await processReel(
+              story.videoUrl,
+              account.handle,
+              `story_${story.id}`,
+            ).catch(() => ({ s3VideoUrl: null, transcript: null as string | null }));
+
+            s3VideoUrl = processed.s3VideoUrl;
+            transcript = processed.transcript || null;
+          }
+
+          await InstagramStory.findOneAndUpdate(
+            { storyId: story.id },
+            {
+              $set: {
+                accountId: account._id,
+                storyId: story.id,
+                handle: account.handle,
+                mediaType: story.mediaType,
+                ...(thumbnailUrl && { thumbnailUrl }),
+                ...(s3VideoUrl && { videoUrl: s3VideoUrl }),
+                ...(transcript && { transcript }),
+                postedAt: story.timestamp ? new Date(story.timestamp) : undefined,
+                syncedAt,
+                expiresAt,
+              },
+            },
+            { upsert: true, new: true },
+          );
+
+          return { id: story.id, mediaType: story.mediaType, thumbnailUrl, videoUrl: s3VideoUrl, status: 'ok' };
+        } catch (err) {
+          return { id: story.id, mediaType: story.mediaType, status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' };
+        }
+      }),
+    );
+
+    res.json({ total: stories.length, stories: results });
+  } catch (err) {
+    res.status(502).json({ message: 'Stories scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
 }
 

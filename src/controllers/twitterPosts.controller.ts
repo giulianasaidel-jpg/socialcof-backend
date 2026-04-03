@@ -4,6 +4,8 @@ import { InstagramAccount } from '../models/InstagramAccount';
 import { Product } from '../models/Product';
 import { Post } from '../models/Post';
 import { MedicalNews } from '../models/MedicalNews';
+import { TikTokPost } from '../models/TikTokPost';
+import { InstagramStory } from '../models/InstagramStory';
 import { generateSlidesFromSource, buildCarouselHtmls } from '../services/twitterPostGenerator';
 import { streamSlidesAsZip, streamSlideAsPng } from '../services/slideExporter';
 import type { DisplayMode, ITwitterLikePost } from '../models/TwitterLikePost';
@@ -22,6 +24,8 @@ function toResponse(doc: InstanceType<typeof TwitterLikePost>) {
     sourceTranscript: doc.sourceTranscript,
     sourceCaption: doc.sourceCaption,
     sourceNewsId: doc.sourceNewsId?.toString() ?? null,
+    sourceTikTokPostId: doc.sourceTikTokPostId?.toString() ?? null,
+    sourceInstagramStoryId: doc.sourceInstagramStoryId?.toString() ?? null,
     status: doc.status,
     generatedAt: doc.generatedAt,
     createdAt: doc.createdAt,
@@ -123,7 +127,9 @@ export async function deleteTwitterPost(req: Request, res: Response): Promise<vo
  * 1. Direct: provide `texts[]` directly — generates HTML immediately.
  * 2. From Instagram post: provide `sourcePostId` — uses transcript + title.
  * 3. From MedFeed news: provide `sourceNewsId` — uses summary + title.
- * 4. Manual: provide `sourceTranscript` + `sourceCaption`.
+ * 4. From TikTok post: provide `sourceTikTokPostId` — uses transcript + title.
+ * 5. From Instagram story: provide `sourceInstagramStoryId` — uses transcript.
+ * 6. Manual: provide `sourceTranscript` + `sourceCaption`.
  *
  * Common options: mode (light|dark), bodyFontSize, profileName, profileHandle, profileImageUrl, slideCount, tone.
  */
@@ -134,6 +140,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     texts,
     sourcePostId,
     sourceNewsId,
+    sourceTikTokPostId,
+    sourceInstagramStoryId,
     sourceTranscript,
     sourceCaption,
     mode = 'dark',
@@ -149,6 +157,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     texts?: string[];
     sourcePostId?: string;
     sourceNewsId?: string;
+    sourceTikTokPostId?: string;
+    sourceInstagramStoryId?: string;
     sourceTranscript?: string;
     sourceCaption?: string;
     mode?: DisplayMode;
@@ -164,8 +174,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     res.status(400).json({ message: 'accountId and productId are required' });
     return;
   }
-  if (!texts?.length && !sourcePostId && !sourceNewsId && !sourceTranscript && !sourceCaption) {
-    res.status(400).json({ message: 'Provide texts[], sourcePostId, sourceNewsId, or sourceTranscript/sourceCaption' });
+  if (!texts?.length && !sourcePostId && !sourceNewsId && !sourceTikTokPostId && !sourceInstagramStoryId && !sourceTranscript && !sourceCaption) {
+    res.status(400).json({ message: 'Provide texts[], sourcePostId, sourceNewsId, sourceTikTokPostId, sourceInstagramStoryId, or sourceTranscript/sourceCaption' });
     return;
   }
 
@@ -200,6 +210,29 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
 
     if (!resolvedTranscript) {
       res.status(422).json({ code: 'NO_SUMMARY', message: 'Notícia sem resumo. Descreva manualmente o conteúdo.' });
+      return;
+    }
+  }
+
+  if (sourceTikTokPostId) {
+    const tiktokPost = await TikTokPost.findById(sourceTikTokPostId);
+    if (!tiktokPost) { res.status(400).json({ message: 'TikTokPost not found' }); return; }
+    resolvedTranscript = resolvedTranscript || tiktokPost.transcript || '';
+    resolvedCaption = resolvedCaption || tiktokPost.title || '';
+
+    if (!resolvedTranscript) {
+      res.status(422).json({ code: 'NO_TRANSCRIPT', message: 'TikTok post sem transcript. Descreva manualmente o conteúdo.' });
+      return;
+    }
+  }
+
+  if (sourceInstagramStoryId) {
+    const story = await InstagramStory.findById(sourceInstagramStoryId);
+    if (!story) { res.status(400).json({ message: 'InstagramStory not found' }); return; }
+    resolvedTranscript = resolvedTranscript || story.transcript || '';
+
+    if (!resolvedTranscript) {
+      res.status(422).json({ code: 'NO_TRANSCRIPT', message: 'Story sem transcript. Descreva manualmente o conteúdo.' });
       return;
     }
   }
@@ -248,6 +281,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
       sourceTranscript: resolvedTranscript,
       sourceCaption: resolvedCaption,
       sourceNewsId: sourceNewsId ?? null,
+      sourceTikTokPostId: sourceTikTokPostId ?? null,
+      sourceInstagramStoryId: sourceInstagramStoryId ?? null,
       status: 'Rascunho',
       generatedAt: new Date(),
     });

@@ -14,11 +14,22 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const MAX_WHISPER_BYTES = 24 * 1024 * 1024;
 
-const DOWNLOAD_HEADERS = {
+const INSTAGRAM_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'video/mp4,video/*,*/*;q=0.8',
   'Referer': 'https://www.instagram.com/',
 };
+
+const TIKTOK_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'video/mp4,video/*,*/*;q=0.8',
+  'Referer': 'https://www.tiktok.com/',
+};
+
+export const DOWNLOAD_HEADERS_BY_PLATFORM = {
+  instagram: INSTAGRAM_HEADERS,
+  tiktok: TIKTOK_HEADERS,
+} as const;
 
 function tmpPath(ext: string): string {
   return path.join(os.tmpdir(), `reel_${crypto.randomBytes(8).toString('hex')}${ext}`);
@@ -27,13 +38,13 @@ function tmpPath(ext: string): string {
 /**
  * Downloads a video from a URL to a local temp file, following redirects.
  */
-function downloadToFile(url: string, destPath: string, redirectsLeft = 5): Promise<void> {
+function downloadToFile(url: string, destPath: string, headers: Record<string, string>, redirectsLeft = 5): Promise<void> {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
-    const req = protocol.get(url, { headers: DOWNLOAD_HEADERS }, (res) => {
+    const req = protocol.get(url, { headers }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
         if (redirectsLeft === 0) return reject(new Error('Too many redirects'));
-        return resolve(downloadToFile(res.headers.location, destPath, redirectsLeft - 1));
+        return resolve(downloadToFile(res.headers.location, destPath, headers, redirectsLeft - 1));
       }
       if (res.statusCode && res.statusCode >= 400) {
         return reject(new Error(`HTTP ${res.statusCode} downloading video`));
@@ -97,12 +108,16 @@ export interface ProcessedReel {
  * Full pipeline: downloads the video, compresses if needed, uploads to S3, and transcribes with Whisper.
  * Cleans up all temp files after completion.
  */
-export async function processReel(videoUrl: string, handle: string, postId: string): Promise<ProcessedReel> {
+export async function processVideo(
+  videoUrl: string,
+  s3Key: string,
+  downloadHeaders: Record<string, string> = INSTAGRAM_HEADERS,
+): Promise<ProcessedReel> {
   const rawPath = tmpPath('.mp4');
   const compressedPath = tmpPath('_compressed.mp4');
 
   try {
-    await downloadToFile(videoUrl, rawPath);
+    await downloadToFile(videoUrl, rawPath, downloadHeaders);
 
     const rawSize = (await fs.promises.stat(rawPath)).size;
     const needsCompression = rawSize > MAX_WHISPER_BYTES;
@@ -114,7 +129,7 @@ export async function processReel(videoUrl: string, handle: string, postId: stri
     }
 
     const [s3VideoUrl, transcript] = await Promise.all([
-      uploadVideoFromFile(videoPath, `instagram/${handle}/${postId}.mp4`).catch(() => null),
+      uploadVideoFromFile(videoPath, s3Key).catch(() => null),
       transcribe(videoPath),
     ]);
 
@@ -124,4 +139,11 @@ export async function processReel(videoUrl: string, handle: string, postId: stri
       fs.unlink(p, () => {});
     }
   }
+}
+
+/**
+ * Convenience wrapper for processing Instagram reels.
+ */
+export async function processReel(videoUrl: string, handle: string, postId: string): Promise<ProcessedReel> {
+  return processVideo(videoUrl, `instagram/${handle}/${postId}.mp4`, INSTAGRAM_HEADERS);
 }

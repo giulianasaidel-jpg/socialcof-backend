@@ -16,12 +16,15 @@ import draftsRoutes from './routes/drafts.routes';
 import referencePostsRoutes from './routes/referencePosts.routes';
 import adminRoutes from './routes/admin.routes';
 import tiktokRoutes from './routes/tiktok.routes';
+import tiktokAccountsRoutes from './routes/tiktokAccounts.routes';
+import instagramStoriesRoutes from './routes/instagramStories.routes';
 import medicalNewsRoutes from './routes/medicalNews.routes';
 import twitterPostsRoutes from './routes/twitterPosts.routes';
 
 import { runMedicalNewsJob } from './jobs/medicalNews.job';
 import { runTikTokTrendsJob } from './jobs/tiktokTrends.job';
 import { runInstagramSyncJob } from './jobs/instagramSync.job';
+import { runMediaSyncJob } from './jobs/mediaSync.job';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
@@ -43,6 +46,8 @@ async function bootstrap(): Promise<void> {
   app.use('/reference-posts', referencePostsRoutes);
   app.use('/admin', adminRoutes);
   app.use('/tiktok', tiktokRoutes);
+  app.use('/tiktok-accounts', tiktokAccountsRoutes);
+  app.use('/instagram-stories', instagramStoriesRoutes);
   app.use('/medical-news', medicalNewsRoutes);
   app.use('/twitter-posts', twitterPostsRoutes);
 
@@ -58,6 +63,10 @@ async function bootstrap(): Promise<void> {
 
   cron.schedule('0 0 * * *', () => {
     runInstagramSyncJob().catch((err) => console.error('[instagramSync] Job error:', err));
+  }, { timezone: 'America/Sao_Paulo' });
+
+  cron.schedule(env.MEDIA_SYNC_CRON_SCHEDULE, () => {
+    runMediaSyncJob().catch((err) => console.error('[mediaSync] Job error:', err));
   }, { timezone: 'America/Sao_Paulo' });
 
   const port = parseInt(env.PORT);

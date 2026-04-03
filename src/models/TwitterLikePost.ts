@@ -17,6 +17,8 @@ export interface ITwitterLikePost extends Document {
   sourceTranscript: string;
   sourceCaption: string;
   sourceNewsId?: Types.ObjectId;
+  sourceTikTokPostId?: Types.ObjectId;
+  sourceInstagramStoryId?: Types.ObjectId;
   status: 'Rascunho' | 'Aprovado' | 'Publicado';
   generatedAt: Date;
   createdAt: Date;
@@ -39,6 +41,8 @@ const twitterLikePostSchema = new Schema<ITwitterLikePost>(
     sourceTranscript: { type: String, default: '' },
     sourceCaption: { type: String, default: '' },
     sourceNewsId: { type: Schema.Types.ObjectId, ref: 'MedicalNews', default: null },
+    sourceTikTokPostId: { type: Schema.Types.ObjectId, ref: 'TikTokPost', default: null },
+    sourceInstagramStoryId: { type: Schema.Types.ObjectId, ref: 'InstagramStory', default: null },
     status: { type: String, enum: ['Rascunho', 'Aprovado', 'Publicado'], default: 'Rascunho' },
     generatedAt: { type: Date },
   },
