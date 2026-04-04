@@ -51,3 +51,42 @@ export async function analyseCarousel(imageUrls: string[]): Promise<string> {
 
   return analyses.join('\n\n');
 }
+
+/**
+ * Analyses a set of images using GPT-4o vision and returns a brand color palette as hex strings.
+ * Sends all images in a single request and asks GPT to identify 4–6 colors that best represent the brand identity.
+ */
+export async function analyseBrandColors(imageUrls: string[]): Promise<string[]> {
+  const client = getClient();
+
+  const imageContent = imageUrls.map((url) => ({
+    type: 'image_url' as const,
+    image_url: { url, detail: 'low' as const },
+  }));
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    max_tokens: 200,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a brand identity expert. Analyze the provided images and identify the dominant colors that best represent this brand\'s visual identity. Return ONLY a valid JSON object with a single "colors" key containing an array of 4 to 6 hex color strings (e.g. "#FF5733"). No explanation, no markdown.',
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Identify the brand color palette from these images.' },
+          ...imageContent,
+        ],
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.2,
+  });
+
+  const parsed = JSON.parse(response.choices[0].message.content ?? '{}') as { colors?: unknown };
+  if (!Array.isArray(parsed.colors)) return [];
+
+  return parsed.colors.filter((c): c is string => typeof c === 'string');
+}

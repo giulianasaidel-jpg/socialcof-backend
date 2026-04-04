@@ -6,7 +6,7 @@ import { Post } from '../models/Post';
 import { MedicalNews } from '../models/MedicalNews';
 import { TikTokPost } from '../models/TikTokPost';
 import { InstagramStory } from '../models/InstagramStory';
-import { generateSlidesFromSource, buildCarouselHtmls } from '../services/twitterPostGenerator';
+import { generateSlidesFromSource, buildCarouselHtmls, isMedCofCompetitorNewsSource } from '../services/twitterPostGenerator';
 import { streamSlidesAsZip, streamSlideAsPng } from '../services/slideExporter';
 import type { DisplayMode, ITwitterLikePost } from '../models/TwitterLikePost';
 
@@ -126,7 +126,7 @@ export async function deleteTwitterPost(req: Request, res: Response): Promise<vo
  * Accepts multiple source modes:
  * 1. Direct: provide `texts[]` directly — generates HTML immediately.
  * 2. From Instagram post: provide `sourcePostId` — uses transcript + title.
- * 3. From MedFeed news: provide `sourceNewsId` — uses summary + title.
+ * 3. From medical news (RSS, PubMed, novidades de sites / Apify): `sourceNewsId` or `newsId` — uses summary + title.
  * 4. From TikTok post: provide `sourceTikTokPostId` — uses transcript + title.
  * 5. From Instagram story: provide `sourceInstagramStoryId` — uses transcript.
  * 6. Manual: provide `sourceTranscript` + `sourceCaption`.
@@ -140,6 +140,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     texts,
     sourcePostId,
     sourceNewsId,
+    newsId,
     sourceTikTokPostId,
     sourceInstagramStoryId,
     sourceTranscript,
@@ -157,6 +158,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     texts?: string[];
     sourcePostId?: string;
     sourceNewsId?: string;
+    newsId?: string;
     sourceTikTokPostId?: string;
     sourceInstagramStoryId?: string;
     sourceTranscript?: string;
@@ -174,8 +176,10 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     res.status(400).json({ message: 'accountId and productId are required' });
     return;
   }
-  if (!texts?.length && !sourcePostId && !sourceNewsId && !sourceTikTokPostId && !sourceInstagramStoryId && !sourceTranscript && !sourceCaption) {
-    res.status(400).json({ message: 'Provide texts[], sourcePostId, sourceNewsId, sourceTikTokPostId, sourceInstagramStoryId, or sourceTranscript/sourceCaption' });
+  const effectiveNewsId = sourceNewsId ?? newsId;
+
+  if (!texts?.length && !sourcePostId && !effectiveNewsId && !sourceTikTokPostId && !sourceInstagramStoryId && !sourceTranscript && !sourceCaption) {
+    res.status(400).json({ message: 'Provide texts[], sourcePostId, sourceNewsId or newsId, sourceTikTokPostId, sourceInstagramStoryId, or sourceTranscript/sourceCaption' });
     return;
   }
 
@@ -189,6 +193,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
   let resolvedTranscript = sourceTranscript ?? '';
   let resolvedCaption = sourceCaption ?? '';
   let resolvedTexts = texts ?? [];
+  let newsAttribution: { sourceLabel: string; mentionInCopy: boolean } | undefined;
 
   if (sourcePostId) {
     const post = await Post.findById(sourcePostId);
@@ -202,15 +207,28 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     }
   }
 
-  if (sourceNewsId) {
-    const news = await MedicalNews.findById(sourceNewsId);
+  if (effectiveNewsId) {
+    const news = await MedicalNews.findById(effectiveNewsId);
     if (!news) { res.status(400).json({ message: 'MedicalNews not found' }); return; }
-    resolvedTranscript = resolvedTranscript || news.summary || '';
-    resolvedCaption = resolvedCaption || news.title || '';
+    const summary = (news.summary || '').trim();
+    const title = (news.title || '').trim();
+    let fromNews = '';
+    if (summary && title) fromNews = `${title}\n\n${summary}`;
+    else fromNews = summary || title;
+    if (!fromNews.trim() && (news.url || '').trim()) fromNews = (news.url || '').trim();
+    resolvedTranscript = resolvedTranscript || fromNews;
+    resolvedCaption = resolvedCaption || title;
 
-    if (!resolvedTranscript) {
-      res.status(422).json({ code: 'NO_SUMMARY', message: 'Notícia sem resumo. Descreva manualmente o conteúdo.' });
+    if (!resolvedTranscript.trim()) {
+      res.status(422).json({ code: 'NO_SUMMARY', message: 'Notícia sem conteúdo. Descreva manualmente o conteúdo.' });
       return;
+    }
+    const srcLabel = (news.source || '').trim();
+    if (srcLabel) {
+      newsAttribution = {
+        sourceLabel: srcLabel,
+        mentionInCopy: !isMedCofCompetitorNewsSource(srcLabel),
+      };
     }
   }
 
@@ -246,6 +264,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
         caption: resolvedCaption,
         slideCount,
         tone,
+        newsAttribution,
       });
       resolvedTexts = generated.slides;
       generatedCaption = generated.caption;
@@ -280,7 +299,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
       caption: generatedCaption,
       sourceTranscript: resolvedTranscript,
       sourceCaption: resolvedCaption,
-      sourceNewsId: sourceNewsId ?? null,
+      sourceNewsId: effectiveNewsId ?? null,
       sourceTikTokPostId: sourceTikTokPostId ?? null,
       sourceInstagramStoryId: sourceInstagramStoryId ?? null,
       status: 'Rascunho',

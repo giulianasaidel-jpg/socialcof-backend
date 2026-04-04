@@ -63,6 +63,35 @@ Retorne um JSON com:
 }
 
 /**
+ * Summarizes a scraped article using GPT-4o-mini.
+ * Accepts the raw full text (truncated to 3000 chars) and returns a 2-3 sentence
+ * medical-grade summary in the same language as the article.
+ */
+export async function summarizeArticle(title: string, text: string, language: 'pt' | 'en' = 'pt'): Promise<string> {
+  const client = getClient();
+  const body = text.slice(0, 3000);
+  const lang = language === 'pt' ? 'português' : 'English';
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content: `You are a medical editor. Write a concise 2-3 sentence summary in ${lang} of the article provided. Focus on the clinical or scientific key point. Return only the summary text, no labels.`,
+      },
+      {
+        role: 'user',
+        content: `Title: ${title}\n\n${body}`,
+      },
+    ],
+    temperature: 0.2,
+    max_tokens: 200,
+  });
+
+  return (response.choices[0].message.content ?? '').trim();
+}
+
+/**
  * Analyzes a set of posts from an account and returns an overall content strategy overview.
  */
 export async function analyzeAccount(

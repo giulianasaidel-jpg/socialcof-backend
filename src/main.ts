@@ -21,7 +21,7 @@ import instagramStoriesRoutes from './routes/instagramStories.routes';
 import medicalNewsRoutes from './routes/medicalNews.routes';
 import twitterPostsRoutes from './routes/twitterPosts.routes';
 
-import { runMedicalNewsJob } from './jobs/medicalNews.job';
+import { runMedicalNewsJob, runApifyBulkScrape } from './jobs/medicalNews.job';
 import { runTikTokTrendsJob } from './jobs/tiktokTrends.job';
 import { runInstagramSyncJob } from './jobs/instagramSync.job';
 import { runMediaSyncJob } from './jobs/mediaSync.job';
@@ -63,6 +63,10 @@ async function bootstrap(): Promise<void> {
 
   cron.schedule('0 0 * * *', () => {
     runInstagramSyncJob().catch((err) => console.error('[instagramSync] Job error:', err));
+  }, { timezone: 'America/Sao_Paulo' });
+
+  cron.schedule(env.NEWS_APIFY_CRON_SCHEDULE, () => {
+    runApifyBulkScrape(3).catch((err) => console.error('[apifyBulkScrape] Job error:', err));
   }, { timezone: 'America/Sao_Paulo' });
 
   cron.schedule(env.MEDIA_SYNC_CRON_SCHEDULE, () => {

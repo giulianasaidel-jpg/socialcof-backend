@@ -9,6 +9,30 @@ function getClient(): OpenAI {
   return new OpenAI({ apiKey: env.GPT_KEY });
 }
 
+function normalizeSourceKey(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, '');
+}
+
+const MEDCOF_NEWS_SOURCE_COMPETITOR_KEYS = [
+  'medway',
+  'medgrupo',
+  'hardworkmedicina',
+  'hardwork',
+  'estrategiamed',
+  'sanarmed',
+  'jaleko',
+];
+
+export function isMedCofCompetitorNewsSource(source: string): boolean {
+  const key = normalizeSourceKey(source.trim());
+  if (!key) return false;
+  return MEDCOF_NEWS_SOURCE_COMPETITOR_KEYS.some((c) => key.includes(c));
+}
+
 export interface TwitterSlideInput {
   texts: string[];
   mode: DisplayMode;
@@ -33,13 +57,30 @@ export async function generateSlidesFromSource(input: {
   caption?: string;
   slideCount?: number;
   tone?: string;
+  newsAttribution?: { sourceLabel: string; mentionInCopy: boolean };
 }): Promise<GeneratedSlides> {
   const client = getClient();
   const slideCount = input.slideCount ?? 5;
 
+  const attributionBlock = (() => {
+    const a = input.newsAttribution;
+    if (!a?.sourceLabel.trim()) return '';
+    if (a.mentionInCopy) {
+      return `
+
+ATRIBUIÇÃO (notícia):
+- Nos slides e na legenda, cite de forma natural a fonte da notícia pelo menos uma vez (ex.: "Fonte: ${a.sourceLabel}", "segundo ${a.sourceLabel}", "dados de ${a.sourceLabel}").
+- Não precisa repetir em todos os slides; basta ficar claro de onde veio a informação.`;
+    }
+    return `
+
+ATRIBUIÇÃO (notícia):
+- A matéria origina-se de veículo concorrente direto da MedCOF: não cite nome da fonte, marca ou site nos slides nem na legenda; transmita só o conteúdo factual.`;
+  })();
+
   const system = `Você é um especialista em conteúdo para médicos residentes e estudantes de medicina brasileiros.
 Sua missão é transformar um conteúdo bruto em um carrossel estilo Twitter/X de alto valor educativo.
-Quando o transcript estiver disponível, ele é a fonte principal do conteúdo — use-o como base. A legenda original é apenas complementar.
+Quando o transcript ou resumo de notícia estiver disponível, essa é a fonte principal — use-a como base. A legenda/título complementar é apenas apoio.
 
 REGRAS DOS SLIDES:
 - Gere exatamente ${slideCount} slides
@@ -51,6 +92,7 @@ REGRAS DOS SLIDES:
 - PROIBIDO usar emojis em excesso (máximo 1 por slide, opcional)
 - Cada slide deve entregar valor real — sem frases genéricas como "é muito importante saber disso"
 - PROIBIDO mencionar concorrentes da MedCOF: Medway, MedGrupo, Hardwork Medicina ou qualquer outra empresa de preparação para residência médica
+${attributionBlock}
 
 LEGENDA DO POST (campo "caption"):
 - Texto para publicar no Instagram acompanhando o carrossel
@@ -65,8 +107,8 @@ Retorne APENAS JSON válido:
 }`;
 
   const userMessage = [
-    input.transcript ? `FONTE PRINCIPAL — Transcript do vídeo:\n"${input.transcript.slice(0, 2500)}"` : '',
-    input.caption ? `Informação complementar — Legenda original do post:\n"${input.caption.slice(0, 600)}"` : '',
+    input.transcript ? `FONTE PRINCIPAL — Transcript ou resumo:\n"${input.transcript.slice(0, 2500)}"` : '',
+    input.caption ? `Informação complementar — Legenda ou título:\n"${input.caption.slice(0, 600)}"` : '',
     `Tom: ${input.tone ?? 'educativo, direto e confiante'}`,
   ]
     .filter(Boolean)

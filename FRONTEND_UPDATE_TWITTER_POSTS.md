@@ -3,6 +3,8 @@
 Base URL: `http://localhost:5003`  
 Autenticação: `Authorization: Bearer <accessToken>` (igual aos demais endpoints).
 
+**Notícias de sites (MedicalNews) →** [FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md](./FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md)
+
 ---
 
 ## Visão geral
@@ -111,6 +113,22 @@ O backend busca o `transcript` e a legenda do post e chama o GPT para gerar os t
 }
 ```
 
+#### Modo 4 — AI a partir de notícia de site (`MedicalNews`)
+
+Use o `_id` retornado em `GET /medical-news` (`data[].id`). O backend monta o texto a partir de título/resumo (e URL em último caso) e chama o GPT. Detalhes, erros e UI: [FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md](./FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md).
+
+```json
+{
+  "accountId": "augustocelho.medcof",
+  "productId": "medcof",
+  "sourceNewsId": "<_id do MedicalNews>",
+  "slideCount": 5,
+  "tone": "educativo e direto"
+}
+```
+
+(`newsId` é alias de `sourceNewsId`.)
+
 #### Campos do body (referência completa)
 
 | Campo | Obrigatório | Tipo | Descrição |
@@ -119,6 +137,8 @@ O backend busca o `transcript` e a legenda do post e chama o GPT para gerar os t
 | `productId` | sim | string | externalId do produto |
 | `texts` | não* | string[] | Textos prontos (pula o GPT) |
 | `sourcePostId` | não* | string | `_id` de um Post para usar transcript/legenda |
+| `sourceNewsId` | não* | string | `_id` de `MedicalNews` (notícia de site / feed) |
+| `newsId` | não* | string | Alias de `sourceNewsId` |
 | `sourceTranscript` | não* | string | Transcript direto |
 | `sourceCaption` | não* | string | Legenda direta |
 | `mode` | não | `'light'` \| `'dark'` | Padrão: `'dark'` |
@@ -128,7 +148,7 @@ O backend busca o `transcript` e a legenda do post e chama o GPT para gerar os t
 | `slideCount` | não | number | Qtd de slides que o GPT deve gerar. Padrão: 5 |
 | `tone` | não | string | Tom para o GPT. Ex: `"empático"`, `"urgente"` |
 
-*Pelo menos um de `texts`, `sourcePostId`, `sourceTranscript` ou `sourceCaption` é obrigatório.
+*Pelo menos uma fonte de conteúdo (ex.: `texts`, `sourcePostId`, `sourceNewsId`/`newsId`, `sourceTranscript`/`sourceCaption`, ou outros modos documentados no controller). Para notícias de sites, ver [FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md](./FRONTEND_UPDATE_TWITTER_POSTS_SITE_NEWS_SOURCE.md).
 
 #### Resposta 201
 

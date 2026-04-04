@@ -24,6 +24,7 @@
     "mongoose": "^8.4.0",
     "multer": "^2.1.1",
     "node-cron": "^3.0.3",
+    "node-vibrant": "^4.0.4",
     "openai": "^6.33.0",
     "puppeteer": "^24.40.0",
     "rss-parser": "^3.13.0",

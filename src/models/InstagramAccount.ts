@@ -1,4 +1,4 @@
-import { Schema, model, Document } from 'mongoose';
+import { Schema, model, Document, Types } from 'mongoose';
 
 export interface IInstagramAccount extends Document {
   externalId: string;
@@ -17,6 +17,9 @@ export interface IInstagramAccount extends Document {
   profilePicS3Url?: string;
   brandColors: string[];
   referenceImages: string[];
+  relatedInstagramAccountIds: Types.ObjectId[];
+  relatedTikTokAccountIds: Types.ObjectId[];
+  relatedMedNewsSourceIds: Types.ObjectId[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -43,6 +46,9 @@ const instagramAccountSchema = new Schema<IInstagramAccount>(
     profilePicS3Url: { type: String },
     brandColors: { type: [String], default: [] },
     referenceImages: { type: [String], default: [] },
+    relatedInstagramAccountIds: { type: [Schema.Types.ObjectId], ref: 'InstagramAccount', default: [] },
+    relatedTikTokAccountIds: { type: [Schema.Types.ObjectId], ref: 'TikTokAccount', default: [] },
+    relatedMedNewsSourceIds: { type: [Schema.Types.ObjectId], ref: 'MedNewsSource', default: [] },
   },
   { timestamps: true },
 );

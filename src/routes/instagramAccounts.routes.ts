@@ -4,12 +4,17 @@ import {
   listAccounts,
   getAccount,
   getAccountStats,
+  getRelatedInterestFeed,
+  getRelatedInstagramInterestFeed,
+  getRelatedTikTokInterestFeed,
+  getRelatedNewsInterestFeed,
   scrapeAccountProfile,
   scrapeAccountPosts,
   scrapeAccountReels,
   scrapeAccountStories,
   analyzeAccountContent,
   discoverAccount,
+  bulkDiscoverAccounts,
   createAccount,
   updateAccount,
   deleteAccount,
@@ -27,7 +32,12 @@ router.use(requireAuth);
 
 router.get('/', listAccounts);
 router.post('/discover', requireAdmin, discoverAccount);
+router.post('/bulk-discover', requireAdmin, bulkDiscoverAccounts);
 router.get('/:id/stats', getAccountStats);
+router.get('/:id/related-feed/instagram', getRelatedInstagramInterestFeed);
+router.get('/:id/related-feed/tiktok', getRelatedTikTokInterestFeed);
+router.get('/:id/related-feed/news', getRelatedNewsInterestFeed);
+router.get('/:id/related-feed', getRelatedInterestFeed);
 router.get('/:id', getAccount);
 router.post('/', requireAdmin, createAccount);
 router.patch('/:id', updateAccount);
