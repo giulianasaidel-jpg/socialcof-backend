@@ -62,6 +62,9 @@ importers:
       rss-parser:
         specifier: ^3.13.0
         version: 3.13.0
+      socialcof-backend:
+        specifier: 'link:'
+        version: 'link:'
       zod:
         specifier: ^3.23.8
         version: 3.25.76

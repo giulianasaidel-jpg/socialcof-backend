@@ -219,7 +219,7 @@ export async function scrapeTikTokAccountPosts(req: Request, res: Response): Pro
       posts.map(async (post) => {
         try {
           const thumbnailUrl = post.thumbnailUrl
-            ? await uploadImageFromUrl(post.thumbnailUrl, `tiktok/${account.handle}/${post.id}_thumb.jpg`).catch(() => null)
+            ? await uploadImageFromUrl(post.thumbnailUrl, `tiktok/${account.handle}/${post.id}_thumb.jpg`)
             : null;
 
           const transcript = thumbnailUrl

@@ -21,13 +21,24 @@ export async function listMedicalNews(req: Request, res: Response): Promise<void
   const parsedLimit = Math.min(100, parseInt(limit));
   const skip = (Math.max(1, parseInt(page)) - 1) * parsedLimit;
 
-  const [news, total] = await Promise.all([
-    MedicalNews.find(filter).sort({ publishedAt: -1 }).skip(skip).limit(parsedLimit),
+  const [rows, total] = await Promise.all([
+    MedicalNews.aggregate([
+      { $match: filter },
+      {
+        $addFields: {
+          _residencyRank: { $cond: [{ $eq: ['$specialty', 'residencia'] }, 0, 1] },
+          _hasSummary: { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$summary', ''] } }, 0] }, 1, 0] },
+        },
+      },
+      { $sort: { publishedAt: -1, _residencyRank: 1, _hasSummary: -1 } },
+      { $skip: skip },
+      { $limit: parsedLimit },
+    ]),
     MedicalNews.countDocuments(filter),
   ]);
 
   res.json({
-    data: news.map((n) => ({
+    data: rows.map((n) => ({
       id: n._id.toString(),
       title: n.title,
       summary: n.summary,
@@ -64,9 +75,9 @@ export async function refreshNews(_req: Request, res: Response): Promise<void> {
 }
 
 /**
- * POST /medical-news/sources/scrape-all — Bulk scrapes all active html sources via Apify.
- * Runs in background with concurrency=3. Progress is streamed via GET /medical-news/stream
- * using the named SSE event `bulk-scrape`.
+ * POST /medical-news/sources/scrape-all — Bulk scrapes all active html sources via Apify (serial).
+ * Progress: GET /medical-news/stream (event: bulk-scrape).
+ * Automated runs use one html source per cron tick (stalest lastScrapedAt first, see NEWS_APIFY_SCRAPE_CRON_SCHEDULE).
  */
 export async function bulkScrapeNewsSources(req: Request, res: Response): Promise<void> {
   const sources = await MedNewsSource.find({ method: 'html', isActive: true });
@@ -77,12 +88,12 @@ export async function bulkScrapeNewsSources(req: Request, res: Response): Promis
     return;
   }
 
-  runApifyBulkScrape(3).catch((err) => console.error('[bulkScrape] Fatal error:', err));
+  runApifyBulkScrape(1).catch((err) => console.error('[bulkScrape] Fatal error:', err));
 
   res.json({
     message: `Bulk scrape started for ${total} sources`,
     total,
-    concurrency: 3,
+    concurrency: 1,
     stream: 'GET /medical-news/stream (event: bulk-scrape)',
   });
 }

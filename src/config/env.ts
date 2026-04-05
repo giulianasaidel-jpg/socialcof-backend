@@ -14,14 +14,16 @@ const envSchema = z.object({
   FRONTEND_URL: z.string().default('http://localhost:3000'),
   TIKTOK_APIFY_TOKEN: z.string().optional(),
   INSTAGRAM_APIFY_TOKEN: z.string().optional(),
+  INSTAGRAM_POSTS_RESULTS_LIMIT: z.string().default('5'),
   GPT_KEY: z.string().optional(),
   AWS_S3_BUCKET: z.string().optional(),
   AWS_REGION: z.string().default('us-east-1'),
+  UNSPLASH_ACCESS_KEY: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().min(1),
   TIKTOK_CRON_SCHEDULE: z.string().default('0 */4 * * *'),
   NEWS_RSS_CRON_SCHEDULE: z.string().default('0 */2 * * *'),
-  NEWS_APIFY_CRON_SCHEDULE: z.string().default('0 6 * * *'),
-  MEDIA_SYNC_CRON_SCHEDULE: z.string().default('0 8 * * *'),
+  INSTAGRAM_SCRAPE_CRON_SCHEDULE: z.string().default('*/10 * * * *'),
+  NEWS_APIFY_SCRAPE_CRON_SCHEDULE: z.string().default('*/10 * * * *'),
 });
 
 const parsed = envSchema.safeParse(process.env);

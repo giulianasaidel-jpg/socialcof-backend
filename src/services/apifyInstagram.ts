@@ -41,17 +41,32 @@ function getClient(): ApifyClient {
   return new ApifyClient({ token: env.INSTAGRAM_APIFY_TOKEN });
 }
 
+function defaultInstagramPostsResultsLimit(): number {
+  const v = parseInt(env.INSTAGRAM_POSTS_RESULTS_LIMIT, 10);
+  if (!Number.isFinite(v) || v < 1) return 5;
+  return Math.min(200, v);
+}
+
+export function resolveInstagramPostResultsLimit(requested?: number): number {
+  const fallback = defaultInstagramPostsResultsLimit();
+  if (requested === undefined) return fallback;
+  const n = Math.floor(Number(requested));
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(200, n);
+}
+
 /**
  * Scrapes full public profile data for an Instagram handle.
  */
 export async function scrapeProfile(handle: string): Promise<ApifyInstagramProfile> {
   const client = getClient();
-  const run = await client.actor('apify/instagram-profile-scraper').call({ usernames: [handle] });
+  const h = handle.replace(/^@/, '').trim();
+  const run = await client.actor('apify/instagram-profile-scraper').call({ usernames: [h] });
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
   const p = items[0] as Record<string, unknown>;
 
   return {
-    username: (p.username ?? handle) as string,
+    username: (p.username ?? h) as string,
     fullName: (p.fullName ?? p.full_name ?? '') as string,
     biography: (p.biography ?? '') as string,
     followersCount: (p.followersCount ?? 0) as number,
@@ -70,12 +85,15 @@ export async function scrapeProfile(handle: string): Promise<ApifyInstagramProfi
 
 /**
  * Scrapes recent posts with full metadata from a public Instagram profile.
+ * `resultsLimit` is always a safe integer (invalid/NaN would make Apify fall back to its UI default, often 50).
  */
-export async function scrapeRecentPosts(handle: string, limit = 50): Promise<ApifyInstagramPost[]> {
+export async function scrapeRecentPosts(handle: string, limit?: number): Promise<ApifyInstagramPost[]> {
   const client = getClient();
+  const resultsLimit = resolveInstagramPostResultsLimit(limit);
+  const normalizedHandle = handle.replace(/^@/, '').trim();
   const run = await client.actor('apify/instagram-post-scraper').call({
-    username: [handle],
-    resultsLimit: limit,
+    username: [normalizedHandle],
+    resultsLimit,
   });
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
@@ -161,7 +179,8 @@ export interface ApifyInstagramStory {
  */
 export async function scrapeStories(handle: string): Promise<ApifyInstagramStory[]> {
   const client = getClient();
-  const run = await client.actor('seemuapps/instagram-story-scraper').call({ usernames: [handle] });
+  const h = handle.replace(/^@/, '').trim();
+  const run = await client.actor('seemuapps/instagram-story-scraper').call({ usernames: [h] });
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
   const profileRecord = items[0] as Record<string, unknown> | undefined;
@@ -183,7 +202,7 @@ export async function scrapeStories(handle: string): Promise<ApifyInstagramStory
       displayUrl: isVideo ? null : mediaUrl,
       videoUrl: isVideo ? mediaUrl : null,
       timestamp,
-      ownerUsername: handle,
+      ownerUsername: h,
     };
   });
 }

@@ -4,6 +4,24 @@ import https from 'https';
 import http from 'http';
 import { env } from '../config/env';
 
+export function formatUploadError(err: unknown): string {
+  if (err instanceof Error) {
+    const code = 'code' in err && typeof (err as NodeJS.ErrnoException).code === 'string'
+      ? ` (${(err as NodeJS.ErrnoException).code})`
+      : '';
+    const base = err.message?.trim() || err.name || 'Error';
+    return `${base}${code}`;
+  }
+  if (err && typeof err === 'object' && 'name' in err) {
+    return String((err as { name: string }).name);
+  }
+  return typeof err === 'string' ? err : JSON.stringify(err);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 let s3: S3Client | null = null;
 
 function getClient(): S3Client {
@@ -55,36 +73,57 @@ async function exists(bucket: string, key: string): Promise<boolean> {
   }
 }
 
+export interface UploadImageFromUrlOptions {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+}
+
 /**
  * Downloads an image from a URL and uploads it to S3.
- * Returns the public S3 URL, or null if AWS_S3_BUCKET is not configured.
- * Skips the upload if the key already exists.
+ * Retries download + Put on transient failures (default 4 attempts, backoff).
+ * Returns null if bucket unset or all attempts fail (does not throw).
  */
-export async function uploadImageFromUrl(imageUrl: string, key: string): Promise<string | null> {
+export async function uploadImageFromUrl(
+  imageUrl: string,
+  key: string,
+  options?: UploadImageFromUrlOptions,
+): Promise<string | null> {
   if (!env.AWS_S3_BUCKET) return null;
+
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 4);
+  const baseDelayMs = options?.baseDelayMs ?? 2500;
 
   const bucket = env.AWS_S3_BUCKET;
   const publicUrl = `https://${bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
 
   if (await exists(bucket, key)) return publicUrl;
 
-  const buffer = await downloadBuffer(imageUrl);
-
-  if (buffer.length < 100) {
-    console.warn(`[s3] Skipping upload for ${key}: buffer too small (${buffer.length} bytes)`);
-    return null;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const buffer = await downloadBuffer(imageUrl);
+      if (buffer.length < 100) {
+        throw new Error(`Image buffer too small (${buffer.length} bytes)`);
+      }
+      await getClient().send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: buffer,
+          ContentType: 'image/jpeg',
+        }),
+      );
+      return publicUrl;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await sleep(baseDelayMs * attempt);
+      }
+    }
   }
 
-  await getClient().send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: buffer,
-      ContentType: 'image/jpeg',
-    }),
-  );
-
-  return publicUrl;
+  console.warn(`[s3] uploadImageFromUrl exhausted for ${key}:`, formatUploadError(lastErr));
+  return null;
 }
 
 /**
@@ -142,10 +181,13 @@ export async function uploadCarouselImages(
   handle: string,
   postId: string,
 ): Promise<string[]> {
-  const results = await Promise.all(
-    displayUrls.map((url, i) =>
-      uploadImageFromUrl(url, `instagram/${handle}/${postId}_slide_${i}.jpg`).catch(() => null),
-    ),
-  );
-  return results.filter((url): url is string => url !== null);
+  const out: string[] = [];
+  for (let i = 0; i < displayUrls.length; i++) {
+    const url = await uploadImageFromUrl(
+      displayUrls[i],
+      `instagram/${handle}/${postId}_slide_${i}.jpg`,
+    );
+    if (url) out.push(url);
+  }
+  return out;
 }

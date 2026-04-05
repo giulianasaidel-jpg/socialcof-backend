@@ -2,16 +2,22 @@ import { Request, Response } from 'express';
 import { Types, type PipelineStage } from 'mongoose';
 import { InstagramAccount } from '../models/InstagramAccount';
 import { TikTokAccount } from '../models/TikTokAccount';
-import { InstagramSyncLog } from '../models/InstagramSyncLog';
 import { InstagramStory } from '../models/InstagramStory';
 import { Post } from '../models/Post';
 import { TikTokPost } from '../models/TikTokPost';
 import { MedicalNews } from '../models/MedicalNews';
 import { MedNewsSource } from '../models/MedNewsSource';
-import { scrapeProfile, scrapeRecentPosts, scrapeStories, toPostFormat } from '../services/apifyInstagram';
+import { scrapeProfile, scrapeRecentPosts, toPostFormat } from '../services/apifyInstagram';
 import { uploadImageFromUrl, uploadCarouselImages, uploadBuffer } from '../services/s3';
-import { processReel } from '../services/videoProcessor';
 import { analyseImage, analyseCarousel, analyseBrandColors } from '../services/visionAnalysis';
+import {
+  scrapeAndPersistProfile,
+  scrapeAndPersistPosts,
+  scrapeAndPersistReels,
+  scrapeAndPersistStories,
+  syncInstagramAccount,
+} from '../services/instagramScrapeActions';
+import { bulkScrapeInstagramAccounts, type BulkScrapeKind } from '../services/instagramBulkScrape';
 import { analyzeAccount } from '../services/gptAnalysis';
 
 const OBJECT_ID_HEX = /^[a-fA-F0-9]{24}$/;
@@ -240,7 +246,7 @@ function makeTikTokAccountLookupStage(accountsColl: string): object {
 
 function relatedFeedSortAndFacetStages(skip: number, limit: number): object[] {
   return [
-    { $sort: { sortAt: -1, _hasTranscript: -1 } },
+    { $sort: { _hasTranscript: -1, sortAt: -1, _residencyFirst: 1 } },
     {
       $facet: {
         total: [{ $count: 'count' }],
@@ -267,6 +273,7 @@ function buildRelatedPostStages(igIds: Types.ObjectId[], igLookupStage: object):
       $addFields: {
         type: { $cond: [{ $eq: ['$format', 'Reels'] }, 'instagram_reel', 'instagram_post'] },
         sortAt: '$postedAt',
+        _residencyFirst: 1,
         _hasTranscript: { $cond: [{ $gt: ['$transcript', ''] }, 1, 0] },
         payload: {
           id: { $toString: '$_id' },
@@ -292,7 +299,7 @@ function buildRelatedPostStages(igIds: Types.ObjectId[], igLookupStage: object):
         },
       },
     },
-    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1 } },
+    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1, _residencyFirst: 1 } },
   ];
 }
 
@@ -306,6 +313,7 @@ function buildRelatedStoryPipeline(igIds: Types.ObjectId[], igLookupStage: objec
       $addFields: {
         type: 'instagram_story',
         sortAt: { $ifNull: ['$postedAt', '$syncedAt'] },
+        _residencyFirst: 1,
         _hasTranscript: { $cond: [{ $gt: ['$transcript', ''] }, 1, 0] },
         payload: {
           id: { $toString: '$_id' },
@@ -334,7 +342,7 @@ function buildRelatedStoryPipeline(igIds: Types.ObjectId[], igLookupStage: objec
         },
       },
     },
-    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1 } },
+    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1, _residencyFirst: 1 } },
   ];
 }
 
@@ -348,6 +356,7 @@ function buildRelatedTiktokPipeline(ttIds: Types.ObjectId[], ttLookupStage: obje
       $addFields: {
         type: 'tiktok_post',
         sortAt: { $ifNull: ['$postedAt', '$syncedAt'] },
+        _residencyFirst: 1,
         _hasTranscript: { $cond: [{ $gt: ['$transcript', ''] }, 1, 0] },
         payload: {
           id: { $toString: '$_id' },
@@ -380,7 +389,7 @@ function buildRelatedTiktokPipeline(ttIds: Types.ObjectId[], ttLookupStage: obje
         },
       },
     },
-    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1 } },
+    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1, _residencyFirst: 1 } },
   ];
 }
 
@@ -403,7 +412,8 @@ function buildRelatedNewsPipelineStages(medSrcColl: string, medNewsLookupPipelin
       $addFields: {
         type: 'medical_news',
         sortAt: '$publishedAt',
-        _hasTranscript: 0,
+        _residencyFirst: { $cond: [{ $eq: ['$specialty', 'residencia'] }, 0, 1] },
+        _hasTranscript: { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$summary', ''] } }, 0] }, 1, 0] },
         payload: {
           id: { $toString: '$_id' },
           title: '$title',
@@ -423,7 +433,7 @@ function buildRelatedNewsPipelineStages(medSrcColl: string, medNewsLookupPipelin
         },
       },
     },
-    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1 } },
+    { $project: { type: 1, sortAt: 1, payload: 1, _hasTranscript: 1, _residencyFirst: 1 } },
   ];
 }
 
@@ -667,7 +677,7 @@ export async function getRelatedNewsInterestFeed(req: Request, res: Response): P
 async function discoverOne(handle: string, workspace: string): Promise<{ account: InstanceType<typeof InstagramAccount>; created: boolean }> {
   const [profile, posts] = await Promise.all([
     scrapeProfile(handle),
-    scrapeRecentPosts(handle, 12),
+    scrapeRecentPosts(handle, 5),
   ]);
 
   const imagePosts = posts.filter((p) => p.type === 'Image' && p.displayUrl).slice(0, 6);
@@ -776,6 +786,56 @@ export async function bulkDiscoverAccounts(req: Request, res: Response): Promise
   };
 
   res.json({ summary, results });
+}
+
+const BULK_SCRAPE_KINDS = new Set<BulkScrapeKind>(['profile', 'posts', 'reels', 'stories', 'sync']);
+const BULK_SCRAPE_MAX_ACCOUNTS = 120;
+
+/**
+ * POST /instagram-accounts/bulk-scrape — Runs the same Apify scrape as the per-account routes for many accounts in parallel batches.
+ * Body: { accountIds: string[] (externalId), kind: profile | posts | reels | stories | sync, postsLimit?: number, reelsLimit?: number }
+ * Accounts are processed one after another (no parallel Apify runs).
+ */
+export async function bulkScrapeAccounts(req: Request, res: Response): Promise<void> {
+  const { accountIds, kind, postsLimit, reelsLimit } = req.body as {
+    accountIds?: unknown;
+    kind?: string;
+    postsLimit?: number;
+    reelsLimit?: number;
+  };
+
+  if (!Array.isArray(accountIds) || accountIds.length === 0) {
+    res.status(400).json({ message: 'accountIds (non-empty array) is required' });
+    return;
+  }
+
+  const stringIds = accountIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+  if (stringIds.length === 0) {
+    res.status(400).json({ message: 'accountIds must contain at least one non-empty string (externalId)' });
+    return;
+  }
+
+  if (stringIds.length > BULK_SCRAPE_MAX_ACCOUNTS) {
+    res.status(400).json({ message: `At most ${BULK_SCRAPE_MAX_ACCOUNTS} externalIds per request` });
+    return;
+  }
+
+  if (!kind || !BULK_SCRAPE_KINDS.has(kind as BulkScrapeKind)) {
+    res.status(400).json({ message: 'kind must be one of: profile, posts, reels, stories, sync' });
+    return;
+  }
+
+  try {
+    const out = await bulkScrapeInstagramAccounts({
+      accountIds: stringIds,
+      kind: kind as BulkScrapeKind,
+      postsLimit,
+      reelsLimit,
+    });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ message: 'Bulk scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
+  }
 }
 
 /**
@@ -938,29 +998,8 @@ export async function scrapeAccountProfile(req: Request, res: Response): Promise
   }
 
   try {
-    const profile = await scrapeProfile(account.handle);
-
-    account.followers = profile.followersCount;
-    account.displayName = profile.fullName || account.displayName;
-    account.lastSyncAt = new Date();
-    await account.save();
-
-    res.json({
-      username: profile.username,
-      fullName: profile.fullName,
-      biography: profile.biography,
-      followersCount: profile.followersCount,
-      followsCount: profile.followsCount,
-      postsCount: profile.postsCount,
-      profilePicUrl: profile.profilePicUrl,
-      profilePicUrlHD: profile.profilePicUrlHD,
-      isVerified: profile.isVerified,
-      isPrivate: profile.isPrivate,
-      isBusinessAccount: profile.isBusinessAccount,
-      externalUrl: profile.externalUrl,
-      externalUrls: profile.externalUrls,
-      igtvVideoCount: profile.igtvVideoCount,
-    });
+    const payload = await scrapeAndPersistProfile(account);
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ message: 'Profile scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
@@ -976,84 +1015,12 @@ export async function scrapeAccountPosts(req: Request, res: Response): Promise<v
     return;
   }
 
-  const limit = Math.min(100, parseInt((req.query.limit as string) ?? '50'));
+  const parsed = parseInt((req.query.limit as string) ?? '5', 10);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : 5));
 
   try {
-    const posts = await scrapeRecentPosts(account.handle, limit);
-
-    const upserted = await Promise.all(
-      posts.map(async (post) => {
-        const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
-        const thumbnailUrl =
-          post.displayUrl && post.type !== 'Video'
-            ? await uploadImageFromUrl(post.displayUrl, `instagram/${account.handle}/${post.id}.jpg`).catch((err) => {
-                console.error(`[s3] upload failed for ${post.id}:`, err.message);
-                return null;
-              })
-            : null;
-
-        const carouselImages =
-          post.type === 'Sidecar' && post.carouselDisplayUrls.length
-            ? await uploadCarouselImages(post.carouselDisplayUrls, account.handle, post.id)
-            : [];
-
-        const transcript = await (async () => {
-          if (post.type === 'Sidecar' && carouselImages.length) {
-            return analyseCarousel(carouselImages).catch(() => null);
-          }
-          if (post.type === 'Image' && thumbnailUrl) {
-            return analyseImage(thumbnailUrl).catch(() => null);
-          }
-          return null;
-        })();
-
-        return Post.findOneAndUpdate(
-          { instagramPostId: post.id },
-          {
-            $set: {
-              accountId: account._id,
-              instagramPostId: post.id,
-              title,
-              postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
-              format: toPostFormat(post.type),
-              likes: post.likesCount,
-              comments: post.commentsCount,
-              postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
-              ...(thumbnailUrl && { thumbnailUrl }),
-              ...(carouselImages.length && { carouselImages }),
-              ...(transcript && { transcript }),
-              syncedAt: new Date(),
-            },
-          },
-          { upsert: true, new: true },
-        );
-      }),
-    );
-
-    account.lastSyncAt = new Date();
-    await account.save();
-
-    res.json({
-      total: upserted.length,
-      posts: posts.map((post) => ({
-        id: post.id,
-        shortCode: post.shortCode,
-        caption: post.caption,
-        likesCount: post.likesCount,
-        commentsCount: post.commentsCount,
-        timestamp: post.timestamp,
-        type: post.type,
-        format: toPostFormat(post.type),
-        url: post.url,
-        displayUrl: post.displayUrl,
-        hashtags: post.hashtags,
-        alt: post.alt,
-        ownerUsername: post.ownerUsername,
-        isPinned: post.isPinned,
-        thumbnailUrl: upserted.find((u) => u?.instagramPostId === post.id)?.thumbnailUrl ?? null,
-        carouselImages: upserted.find((u) => u?.instagramPostId === post.id)?.carouselImages ?? [],
-      })),
-    });
+    const payload = await scrapeAndPersistPosts(account, limit);
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ message: 'Posts scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
@@ -1069,49 +1036,12 @@ export async function scrapeAccountReels(req: Request, res: Response): Promise<v
     return;
   }
 
-  const limit = Math.min(20, parseInt((req.query.limit as string) ?? '10'));
+  const parsed = parseInt((req.query.limit as string) ?? '5', 10);
+  const limit = Math.min(20, Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : 5));
 
   try {
-    const posts = await scrapeRecentPosts(account.handle, limit);
-    const reels = posts.filter((p) => p.type === 'Video' && p.videoUrl);
-
-    const results = await Promise.all(
-      reels.map(async (post) => {
-        try {
-          const { s3VideoUrl, transcript } = await processReel(post.videoUrl!, account.handle, post.id);
-          const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
-
-          await Post.findOneAndUpdate(
-            { instagramPostId: post.id },
-            {
-              $set: {
-                accountId: account._id,
-                instagramPostId: post.id,
-                title,
-                postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
-                format: 'Reels',
-                likes: post.likesCount,
-                comments: post.commentsCount,
-                postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
-                ...(s3VideoUrl && { videoUrl: s3VideoUrl }),
-                ...(transcript && { transcript }),
-                syncedAt: new Date(),
-              },
-            },
-            { upsert: true, new: true },
-          );
-
-          return { id: post.id, shortCode: post.shortCode, s3VideoUrl, transcript, status: 'ok' };
-        } catch (err) {
-          return { id: post.id, shortCode: post.shortCode, status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' };
-        }
-      }),
-    );
-
-    account.lastSyncAt = new Date();
-    await account.save();
-
-    res.json({ total: reels.length, reels: results });
+    const payload = await scrapeAndPersistReels(account, limit);
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ message: 'Reels scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
@@ -1157,81 +1087,15 @@ export async function syncAccount(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  let syncedCount = 0;
-
   try {
-    const [profile, posts] = await Promise.all([
-      scrapeProfile(account.handle),
-      scrapeRecentPosts(account.handle, 50),
-    ]);
-
-    account.followers = profile.followersCount;
-
-    for (const post of posts) {
-      const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
-      const thumbnailUrl =
-        post.displayUrl && post.type !== 'Video'
-          ? await uploadImageFromUrl(post.displayUrl, `instagram/${account.handle}/${post.id}.jpg`).catch(() => null)
-          : null;
-
-      const carouselImages =
-        post.type === 'Sidecar' && post.carouselDisplayUrls.length
-          ? await uploadCarouselImages(post.carouselDisplayUrls, account.handle, post.id)
-          : [];
-
-      const transcript = await (async () => {
-        if (post.type === 'Sidecar' && carouselImages.length) {
-          return analyseCarousel(carouselImages).catch(() => null);
-        }
-        if (post.type === 'Image' && thumbnailUrl) {
-          return analyseImage(thumbnailUrl).catch(() => null);
-        }
-        return null;
-      })();
-
-      await Post.findOneAndUpdate(
-        { instagramPostId: post.id },
-        {
-          $set: {
-            accountId: account._id,
-            instagramPostId: post.id,
-            title,
-            postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
-            format: toPostFormat(post.type),
-            likes: post.likesCount,
-            comments: post.commentsCount,
-            postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
-            ...(thumbnailUrl && { thumbnailUrl }),
-            ...(carouselImages.length && { carouselImages }),
-            ...(transcript && { transcript }),
-            syncedAt: new Date(),
-          },
-        },
-        { upsert: true, new: true },
-      );
-
-      syncedCount++;
-    }
-
-    account.lastSyncAt = new Date();
-    await account.save();
-
-    await InstagramSyncLog.create({
-      accountId: account._id,
-      at: new Date(),
-      level: 'ok',
-      message: `Synced ${syncedCount} posts via Apify`,
+    const data = await syncInstagramAccount(account);
+    res.json({
+      message: 'Sync complete',
+      followers: data.followers,
+      syncedPosts: data.syncedPosts,
+      lastSyncAt: data.lastSyncAt,
     });
-
-    res.json({ message: 'Sync complete', followers: account.followers, syncedPosts: syncedCount, lastSyncAt: account.lastSyncAt });
   } catch (err) {
-    await InstagramSyncLog.create({
-      accountId: account._id,
-      at: new Date(),
-      level: 'erro',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    });
-
     res.status(502).json({ message: 'Sync failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
 }
@@ -1247,65 +1111,8 @@ export async function scrapeAccountStories(req: Request, res: Response): Promise
   }
 
   try {
-    const stories = await scrapeStories(account.handle);
-    const syncedAt = new Date();
-    const expiresAt = new Date(syncedAt.getTime() + 24 * 60 * 60 * 1000);
-
-    const results = await Promise.all(
-      stories.map(async (story) => {
-        try {
-          let thumbnailUrl: string | null = null;
-          let s3VideoUrl: string | null = null;
-          let transcript: string | null = null;
-
-          if (story.mediaType === 'image' && story.displayUrl) {
-            thumbnailUrl = await uploadImageFromUrl(
-              story.displayUrl,
-              `instagram/${account.handle}/stories/${story.id}.jpg`,
-            ).catch(() => null);
-
-            const imageForAnalysis = thumbnailUrl ?? story.displayUrl;
-            transcript = await analyseImage(imageForAnalysis).catch(() => null);
-          }
-
-          if (story.mediaType === 'video' && story.videoUrl) {
-            const processed = await processReel(
-              story.videoUrl,
-              account.handle,
-              `story_${story.id}`,
-            ).catch(() => ({ s3VideoUrl: null, transcript: null as string | null }));
-
-            s3VideoUrl = processed.s3VideoUrl;
-            transcript = processed.transcript || null;
-          }
-
-          await InstagramStory.findOneAndUpdate(
-            { storyId: story.id },
-            {
-              $set: {
-                accountId: account._id,
-                storyId: story.id,
-                handle: account.handle,
-                mediaType: story.mediaType,
-                ...(thumbnailUrl && { thumbnailUrl }),
-                ...(s3VideoUrl && { videoUrl: s3VideoUrl }),
-                ...(transcript && { transcript }),
-                postedAt: story.timestamp ? new Date(story.timestamp) : undefined,
-                syncedAt,
-                expiresAt,
-              },
-            },
-            { upsert: true, new: true },
-          );
-
-          return { id: story.id, mediaType: story.mediaType, thumbnailUrl, videoUrl: s3VideoUrl, status: 'ok' };
-        } catch (err) {
-          return { id: story.id, mediaType: story.mediaType, status: 'failed', error: err instanceof Error ? err.message : 'Unknown error' };
-        }
-      }),
-    );
-
-    res.json({ total: stories.length, stories: results });
+    const payload = await scrapeAndPersistStories(account);
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ message: 'Stories scrape failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }

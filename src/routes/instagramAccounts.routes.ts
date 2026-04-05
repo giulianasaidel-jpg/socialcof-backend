@@ -15,6 +15,7 @@ import {
   analyzeAccountContent,
   discoverAccount,
   bulkDiscoverAccounts,
+  bulkScrapeAccounts,
   createAccount,
   updateAccount,
   deleteAccount,
@@ -33,6 +34,7 @@ router.use(requireAuth);
 router.get('/', listAccounts);
 router.post('/discover', requireAdmin, discoverAccount);
 router.post('/bulk-discover', requireAdmin, bulkDiscoverAccounts);
+router.post('/bulk-scrape', requireAdmin, bulkScrapeAccounts);
 router.get('/:id/stats', getAccountStats);
 router.get('/:id/related-feed/instagram', getRelatedInstagramInterestFeed);
 router.get('/:id/related-feed/tiktok', getRelatedTikTokInterestFeed);

@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   await mongoose.connect(env.MONGOURI);
   console.log('[runBulkScrape] Connected to MongoDB');
 
-  await runApifyBulkScrape(3);
+  await runApifyBulkScrape(1);
 
   await mongoose.disconnect();
 }

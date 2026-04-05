@@ -193,6 +193,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
   let resolvedTranscript = sourceTranscript ?? '';
   let resolvedCaption = sourceCaption ?? '';
   let resolvedTexts = texts ?? [];
+  const mediaUrls: string[] = [];
   let newsAttribution: { sourceLabel: string; mentionInCopy: boolean } | undefined;
 
   if (sourcePostId) {
@@ -200,6 +201,9 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     if (!post) { res.status(400).json({ message: 'Source post not found' }); return; }
     resolvedTranscript = resolvedTranscript || post.transcript || '';
     resolvedCaption = resolvedCaption || post.title || '';
+
+    if (post.carouselImages?.length) mediaUrls.push(...post.carouselImages);
+    else if (post.thumbnailUrl) mediaUrls.push(post.thumbnailUrl);
 
     if (!resolvedTranscript) {
       res.status(422).json({ code: 'NO_TRANSCRIPT', message: 'Post sem transcript. Descreva manualmente o conteúdo do post.' });
@@ -218,6 +222,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     if (!fromNews.trim() && (news.url || '').trim()) fromNews = (news.url || '').trim();
     resolvedTranscript = resolvedTranscript || fromNews;
     resolvedCaption = resolvedCaption || title;
+
+    if (news.imageUrl) mediaUrls.push(news.imageUrl);
 
     if (!resolvedTranscript.trim()) {
       res.status(422).json({ code: 'NO_SUMMARY', message: 'Notícia sem conteúdo. Descreva manualmente o conteúdo.' });
@@ -238,6 +244,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     resolvedTranscript = resolvedTranscript || tiktokPost.transcript || '';
     resolvedCaption = resolvedCaption || tiktokPost.title || '';
 
+    if (tiktokPost.thumbnailUrl) mediaUrls.push(tiktokPost.thumbnailUrl);
+
     if (!resolvedTranscript) {
       res.status(422).json({ code: 'NO_TRANSCRIPT', message: 'TikTok post sem transcript. Descreva manualmente o conteúdo.' });
       return;
@@ -248,6 +256,8 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     const story = await InstagramStory.findById(sourceInstagramStoryId);
     if (!story) { res.status(400).json({ message: 'InstagramStory not found' }); return; }
     resolvedTranscript = resolvedTranscript || story.transcript || '';
+
+    if (story.thumbnailUrl) mediaUrls.push(story.thumbnailUrl);
 
     if (!resolvedTranscript) {
       res.status(422).json({ code: 'NO_TRANSCRIPT', message: 'Story sem transcript. Descreva manualmente o conteúdo.' });
@@ -262,6 +272,7 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
       const generated = await generateSlidesFromSource({
         transcript: resolvedTranscript,
         caption: resolvedCaption,
+        imageUrls: mediaUrls,
         slideCount,
         tone,
         newsAttribution,

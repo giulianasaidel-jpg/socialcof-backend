@@ -20,11 +20,15 @@ import tiktokAccountsRoutes from './routes/tiktokAccounts.routes';
 import instagramStoriesRoutes from './routes/instagramStories.routes';
 import medicalNewsRoutes from './routes/medicalNews.routes';
 import twitterPostsRoutes from './routes/twitterPosts.routes';
+import storyReplyRoutes from './routes/storyReply.routes';
+import imagePostRoutes from './routes/imagePost.routes';
 
-import { runMedicalNewsJob, runApifyBulkScrape } from './jobs/medicalNews.job';
+import { runMedicalNewsJob, runApifyNewsRoundRobinTick } from './jobs/medicalNews.job';
 import { runTikTokTrendsJob } from './jobs/tiktokTrends.job';
-import { runInstagramSyncJob } from './jobs/instagramSync.job';
-import { runMediaSyncJob } from './jobs/mediaSync.job';
+import { runInstagramScrapeRoundRobinTick } from './jobs/instagramScrapeRoundRobin.job';
+import { runMediaSyncSlotTick } from './jobs/mediaSync.job';
+
+const SAO_PAULO_TZ = 'America/Sao_Paulo';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
@@ -50,6 +54,8 @@ async function bootstrap(): Promise<void> {
   app.use('/instagram-stories', instagramStoriesRoutes);
   app.use('/medical-news', medicalNewsRoutes);
   app.use('/twitter-posts', twitterPostsRoutes);
+  app.use('/story-replies', storyReplyRoutes);
+  app.use('/image-posts', imagePostRoutes);
 
   app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 
@@ -61,17 +67,29 @@ async function bootstrap(): Promise<void> {
     runTikTokTrendsJob().catch((err) => console.error('[tiktokTrends] Job error:', err));
   });
 
-  cron.schedule('0 0 * * *', () => {
-    runInstagramSyncJob().catch((err) => console.error('[instagramSync] Job error:', err));
-  }, { timezone: 'America/Sao_Paulo' });
+  cron.schedule(
+    env.INSTAGRAM_SCRAPE_CRON_SCHEDULE,
+    () => {
+      runInstagramScrapeRoundRobinTick().catch((err) => console.error('[cron] Instagram scrape tick:', err));
+    },
+    { timezone: SAO_PAULO_TZ },
+  );
 
-  cron.schedule(env.NEWS_APIFY_CRON_SCHEDULE, () => {
-    runApifyBulkScrape(3).catch((err) => console.error('[apifyBulkScrape] Job error:', err));
-  }, { timezone: 'America/Sao_Paulo' });
+  cron.schedule(
+    env.NEWS_APIFY_SCRAPE_CRON_SCHEDULE,
+    () => {
+      runApifyNewsRoundRobinTick().catch((err) => console.error('[cron] Apify news scrape tick:', err));
+    },
+    { timezone: SAO_PAULO_TZ },
+  );
 
-  cron.schedule(env.MEDIA_SYNC_CRON_SCHEDULE, () => {
-    runMediaSyncJob().catch((err) => console.error('[mediaSync] Job error:', err));
-  }, { timezone: 'America/Sao_Paulo' });
+  cron.schedule(
+    '* * * * *',
+    () => {
+      runMediaSyncSlotTick().catch((err) => console.error('[cron] Media sync tick:', err));
+    },
+    { timezone: SAO_PAULO_TZ },
+  );
 
   const port = parseInt(env.PORT);
   app.listen(port, () => {

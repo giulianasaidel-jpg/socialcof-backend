@@ -40,6 +40,28 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 /**
+ * Like requireAuth but also accepts ?token= query param (for iframe src usage).
+ */
+export function requireAuthOrToken(req: Request, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : null;
+  const raw = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : queryToken;
+
+  if (!raw) {
+    res.status(401).json({ message: 'Missing token' });
+    return;
+  }
+
+  try {
+    const payload = jwt.verify(raw, env.JWT_SECRET) as JwtPayload;
+    req.user = payload;
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired token' });
+  }
+}
+
+/**
  * Restricts access to users with the admin role.
  * Must be used after requireAuth.
  */

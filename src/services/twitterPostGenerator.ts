@@ -3,6 +3,7 @@ import https from 'https';
 import http from 'http';
 import { env } from '../config/env';
 import type { DisplayMode } from '../models/TwitterLikePost';
+import type { ImagePostBandStyle, ImagePostOverlayFont, ImageStyle } from '../models/ImagePost';
 
 function getClient(): OpenAI {
   if (!env.GPT_KEY) throw new Error('GPT_KEY is not configured');
@@ -55,6 +56,7 @@ export interface GeneratedSlides {
 export async function generateSlidesFromSource(input: {
   transcript?: string;
   caption?: string;
+  imageUrls?: string[];
   slideCount?: number;
   tone?: string;
   newsAttribution?: { sourceLabel: string; mentionInCopy: boolean };
@@ -78,9 +80,21 @@ ATRIBUIÇÃO (notícia):
 - A matéria origina-se de veículo concorrente direto da MedCOF: não cite nome da fonte, marca ou site nos slides nem na legenda; transmita só o conteúdo factual.`;
   })();
 
+  const firstLastRules =
+    slideCount <= 1
+      ? `- Slide único: abra com **headline-gancho** forte no começo; no mesmo texto, traga o núcleo útil e feche com **CTA** curto pedindo comentário ou opinião`
+      : `- **Primeiro slide:** abra com **headline-gancho** — curta, que prenda atenção (pergunta incisiva, dado surpreendente, contraste, tensão clínica). Quando fizer sentido, pode ser levemente **provocativo** (inteligente, nunca sensacionalista nem antiético). Evite aberturas genéricas, óbvias ou "blazé"
+- **Último slide:** encerre com **CTA** variado pedindo comentário ou opinião (ex.: concordância, o que fariam no caso, experiência pessoal, debate civil). Tom profissional; não soar vazio`;
+
   const system = `Você é um especialista em conteúdo para médicos residentes e estudantes de medicina brasileiros.
 Sua missão é transformar um conteúdo bruto em um carrossel estilo Twitter/X de alto valor educativo.
 Quando o transcript ou resumo de notícia estiver disponível, essa é a fonte principal — use-a como base. A legenda/título complementar é apenas apoio.
+
+ENRIQUECIMENTO DE CONTEÚDO:
+- Não se limite ao que está na fonte: use seu conhecimento médico para acrescentar contexto clínico relevante
+- Adicione dados concretos, estatísticas, referências a guidelines (SBP, SBEM, AHA, ESC, UpToDate, etc.) ou evidências que complementem e fortaleçam o conteúdo
+- Inclua pearls clínicos, armadilhas diagnósticas ou nuances práticas que o texto-fonte não aborda mas que são pertinentes ao tema
+- O objetivo é que o post entregue mais valor do que apenas rephrasar o que foi enviado — que quem leia aprenda algo além do óbvio
 
 REGRAS DOS SLIDES:
 - Gere exatamente ${slideCount} slides
@@ -89,7 +103,10 @@ REGRAS DOS SLIDES:
 - Linguagem direta, sem enrolação — como uma dica de colega sênior para calouro
 - Máximo de 260 caracteres por slide
 - PROIBIDO usar hashtags nos slides
-- PROIBIDO usar emojis em excesso (máximo 1 por slide, opcional)
+- Emojis: use só quando fizer sentido (clareza, alerta, tom); evite enfeite vazio — no máximo 2 por slide quando couber naturalmente
+- Negrito: pode destacar termos-chave com **assim** (markdown só com ** para negrito, sem _itálico_ nem links)
+${firstLastRules}
+- Opcional no primeiro slide: uma linha estilo thread ("Segue o fio", "Thread rápida") só se combinar bem com o gancho — não é obrigatório
 - Cada slide deve entregar valor real — sem frases genéricas como "é muito importante saber disso"
 - PROIBIDO mencionar concorrentes da MedCOF: Medway, MedGrupo, Hardwork Medicina ou qualquer outra empresa de preparação para residência médica
 ${attributionBlock}
@@ -100,19 +117,31 @@ LEGENDA DO POST (campo "caption"):
 - Inclua 8 a 12 hashtags relevantes para medicina, residência médica e a especialidade do conteúdo
 - Separe as hashtags em um bloco ao final da legenda
 
-Retorne APENAS JSON válido:
+Retorne APENAS JSON válido (cada string em "slides" pode incluir **negrito** e emojis conforme as regras):
 {
   "slides": ["texto slide 1", "texto slide 2", ...],
   "caption": "legenda completa com hashtags ao final"
 }`;
 
-  const userMessage = [
+  const textParts = [
     input.transcript ? `FONTE PRINCIPAL — Transcript ou resumo:\n"${input.transcript.slice(0, 2500)}"` : '',
     input.caption ? `Informação complementar — Legenda ou título:\n"${input.caption.slice(0, 600)}"` : '',
     `Tom: ${input.tone ?? 'educativo, direto e confiante'}`,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  ].filter(Boolean);
+
+  const images = (input.imageUrls ?? []).filter(Boolean).slice(0, 6);
+
+  const userContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: 'low' } }> = [
+    { type: 'text' as const, text: textParts.join('\n\n') },
+    ...images.map((url) => ({ type: 'image_url' as const, image_url: { url, detail: 'low' as const } })),
+  ];
+
+  if (images.length) {
+    userContent.push({
+      type: 'text' as const,
+      text: 'MÍDIA FONTE — Analise as imagens acima em busca de textos visíveis, gráficos, dados, diagramas ou elementos visuais relevantes. Use qualquer informação útil para enriquecer os slides.',
+    });
+  }
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -120,7 +149,7 @@ Retorne APENAS JSON válido:
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: userMessage },
+      { role: 'user', content: userContent },
     ],
   });
 
@@ -160,6 +189,21 @@ const COLORS = {
 
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function slideLineToHtml(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) return '';
+  const escaped = escapeHtml(trimmed);
+  return escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
 function formatCount(n: number): string {
@@ -213,7 +257,6 @@ function buildSlideHtml(
   bodyFontSize: number = 20,
 ): string {
   const c = COLORS[mode];
-  const eng = mockEngagement();
 
   const avatar = profileImageUrl
     ? `<img src="${profileImageUrl}" alt="avatar" style="width:52px;height:52px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous"/>`
@@ -225,7 +268,7 @@ function buildSlideHtml(
   const paragraphs = text
     .split('\n')
     .filter((l) => l.trim())
-    .map((l) => `<p style="margin:0 0 14px 0;line-height:1.6;">${l.trim()}</p>`)
+    .map((l) => `<p style="margin:0 0 14px 0;line-height:1.6;">${slideLineToHtml(l)}</p>`)
     .join('');
 
   const counter = total > 1
@@ -291,16 +334,8 @@ function buildSlideHtml(
     line-height:1.6;
     overflow:hidden;
   }
+  .body strong{font-weight:700;}
   .divider{border:none;border-top:1px solid ${c.border};margin:14px 0;}
-  .stats{display:flex;gap:6px;margin-bottom:14px;font-size:13px;color:${c.subtext};}
-  .stats b{color:${c.text};}
-  .footer{display:flex;justify-content:space-between;color:${c.icon};font-size:22px;}
-  .footer button{
-    background:none;border:none;cursor:pointer;
-    color:${c.icon};font-size:14px;
-    display:flex;align-items:center;gap:6px;padding:0;
-  }
-  .footer button:hover{color:${c.link};}
 </style>
 </head>
 <body>
@@ -317,36 +352,6 @@ function buildSlideHtml(
   <div class="body">${paragraphs}</div>
 
   <hr class="divider"/>
-
-  <div class="stats">
-    <span><b>${formatCount(eng.reposts)}</b> Reposts</span>
-    <span style="margin:0 4px;">·</span>
-    <span><b>${formatCount(eng.likes)}</b> Curtidas</span>
-    <span style="margin:0 4px;">·</span>
-    <span><b>${formatCount(eng.views)}</b> Visualizações</span>
-  </div>
-
-  <div class="footer">
-    <button>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      ${formatCount(eng.replies)}
-    </button>
-    <button>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-      ${formatCount(eng.reposts)}
-    </button>
-    <button>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-      ${formatCount(eng.likes)}
-    </button>
-    <button>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-      ${formatCount(eng.views)}
-    </button>
-    <button>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-    </button>
-  </div>
 </div>
 </body>
 </html>`;
@@ -377,4 +382,697 @@ export async function buildCarouselHtmls(input: TwitterSlideInput): Promise<stri
   return texts.map((text, i) =>
     buildSlideHtml(text, mode, profileName, profileHandle, avatarDataUri, i, texts.length, bodyFontSize),
   );
+}
+
+export interface GeneratedStoryReply {
+  question: string;
+  answer: string;
+  caption: string;
+}
+
+export async function generateStoryReply(input: {
+  transcript?: string;
+  caption?: string;
+  imageUrls?: string[];
+  tone?: string;
+}): Promise<GeneratedStoryReply> {
+  const client = getClient();
+
+  const system = `Você cria conteúdo lo-fi para médicos residentes e estudantes de medicina no Instagram Stories.
+Estilo: casual, direto, como se um colega de residência tivesse respondendo no celular mesmo.
+
+PERGUNTA:
+- Escreva como um seguidor digitando rápido — sem formalidade, sem ponto final obrigatório
+- Dúvida clínica real, curta, derivada do conteúdo. Máximo 100 caracteres
+- Ex: "qual dose de ataque da amio na PCR mesmo?"
+
+RESPOSTA:
+- Escreva como quem responde no Stories, sem enrolação
+- Frases curtas. Máximo 320 caracteres
+- Marque 2 a 4 termos clínicos-chave com ~til~ (ex: ~150mg IV~, ~10 minutos~) — esses ficam em laranja na tela
+- SEM asteriscos, SEM negrito, SEM markdown de formatação
+- Um emoji no máximo, só se ficar natural
+- PROIBIDO mencionar: Medway, MedGrupo, Hardwork, Estratégia MED, Sanar, Jaleko
+
+LEGENDA:
+- 2 linhas convidando a mandar mais dúvidas, tom de conversa
+- 5 a 7 hashtags ao final
+
+Retorne APENAS JSON válido:
+{
+  "question": "texto da pergunta",
+  "answer": "texto da resposta com ~termos~ marcados",
+  "caption": "legenda completa com hashtags"
+}`;
+
+  const textParts = [
+    input.transcript ? `FONTE — Transcript ou resumo:\n"${input.transcript.slice(0, 2500)}"` : '',
+    input.caption ? `Contexto — Legenda ou título:\n"${input.caption.slice(0, 600)}"` : '',
+    `Tom: ${input.tone ?? 'didático e acessível'}`,
+  ].filter(Boolean);
+
+  const images = (input.imageUrls ?? []).filter(Boolean).slice(0, 4);
+
+  const userContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: 'low' } }> = [
+    { type: 'text' as const, text: textParts.join('\n\n') },
+    ...images.map((url) => ({ type: 'image_url' as const, image_url: { url, detail: 'low' as const } })),
+  ];
+
+  if (images.length) {
+    userContent.push({ type: 'text' as const, text: 'Analise as imagens acima em busca de dados clínicos, textos ou diagramas para formular a dúvida e resposta.' });
+  }
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    temperature: 0.8,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ],
+  });
+
+  const raw = JSON.parse(response.choices[0].message.content ?? '{}') as {
+    question?: string;
+    answer?: string;
+    caption?: string;
+  };
+
+  return {
+    question: raw.question ?? '',
+    answer: raw.answer ?? '',
+    caption: raw.caption ?? '',
+  };
+}
+
+import type { StoryFont } from '../models/StoryReply';
+
+const FONT_MAP: Record<StoryFont, { query: string; family: string }> = {
+  classic:    { query: 'Inter:wght@400;500',                  family: "'Inter', sans-serif" },
+  modern:     { query: 'Playfair+Display:wght@400',           family: "'Playfair Display', serif" },
+  strong:     { query: 'Oswald:wght@600;700',                 family: "'Oswald', sans-serif" },
+  typewriter: { query: 'Courier+Prime',                       family: "'Courier Prime', monospace" },
+  editor:     { query: 'DM+Serif+Display',                    family: "'DM Serif Display', serif" },
+  poster:     { query: 'Anton',                               family: "'Anton', sans-serif" },
+  literature: { query: 'Lora:ital,wght@0,400;0,500',          family: "'Lora', serif" },
+};
+
+const INTER_TAG = `<link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet"/>`;
+
+function fontTag(font: StoryFont): string {
+  if (font === 'classic') return INTER_TAG;
+  const f = FONT_MAP[font];
+  return `${INTER_TAG}<link href="https://fonts.googleapis.com/css2?family=${f.query}&display=swap" rel="stylesheet"/>`;
+}
+
+function highlightTilde(text: string, color: string): string {
+  return escapeHtml(text).replace(/~([^~]+)~/g, `<span style="color:${color};">$1</span>`);
+}
+
+function buildCaixinhaSticker(question: string, compact = false, stickerFontSize?: number): string {
+  const defaultSize = compact ? 36 : 42;
+  const bodySize = stickerFontSize ?? defaultSize;
+  const bodyPad = compact ? '22px 28px' : '28px 32px';
+  return `<div class="sticker${compact ? ' compact' : ''}">
+  <div class="sticker-header">pergunte aqui</div>
+  <div class="sticker-body" style="padding:${bodyPad};font-size:${bodySize}px;">${escapeHtml(question)}</div>
+</div>`;
+}
+
+const STICKER_CSS = `
+.sticker{width:fit-content;min-width:380px;max-width:700px;border-radius:18px;overflow:hidden;font-family:'Inter',sans-serif;display:flex;flex-direction:column;}
+.sticker-header{background:#1c1c1e;padding:16px 26px;font-size:23px;color:#8e8e93;text-align:center;font-weight:400;letter-spacing:0.3px;flex-shrink:0;}
+.sticker-body{background:#fff;font-weight:400;color:#000;line-height:1.4;flex:1;display:flex;align-items:flex-start;}`;
+
+function buildStoryBgLayers(backgroundUrl?: string, overlayColor?: string): string {
+  if (!backgroundUrl) return '';
+  const ov = overlayColor || 'rgba(0,0,0,0.65)';
+  return `<div style="position:absolute;inset:0;background:url('${backgroundUrl}') center/cover no-repeat;z-index:0;"></div><div style="position:absolute;inset:0;background:${ov};z-index:1;"></div>`;
+}
+
+export function buildStoryQuestionHtml(
+  question: string,
+  _mode: DisplayMode,
+  _profileName: string,
+  _brandColors: string[],
+  _font: StoryFont = 'classic',
+  _textColor = '#ffffff',
+  _highlightColor = '#FF6B2B',
+  stickerFontSize?: number,
+  bgOptions?: { backgroundUrl?: string; overlayColor?: string },
+): string {
+  const hasBg = Boolean(bgOptions?.backgroundUrl);
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+${INTER_TAG}
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1920px;overflow:hidden;background:#000;position:relative;}
+.content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;padding:200px 80px 80px;height:100%;}
+${STICKER_CSS}
+</style></head>
+<body>
+${hasBg ? buildStoryBgLayers(bgOptions!.backgroundUrl, bgOptions!.overlayColor) : ''}
+<div class="content">
+${buildCaixinhaSticker(question, false, stickerFontSize)}
+</div>
+</body></html>`;
+}
+
+export function buildStoryAnswerHtml(
+  question: string,
+  answer: string,
+  _mode: DisplayMode,
+  _profileName: string,
+  _brandColors: string[],
+  font: StoryFont = 'classic',
+  textColor = '#ffffff',
+  highlightColor = '#FF6B2B',
+  stickerFontSize?: number,
+  answerFontSize?: number,
+  bgOptions?: { backgroundUrl?: string; overlayColor?: string },
+): string {
+  const ff = FONT_MAP[font].family;
+  const resolvedAnswerSize = answerFontSize ?? 44;
+  const hasBg = Boolean(bgOptions?.backgroundUrl);
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+${fontTag(font)}
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1920px;overflow:hidden;background:#000;position:relative;}
+.content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;padding:200px 80px 80px;height:100%;}
+${STICKER_CSS}
+.sticker{margin-bottom:64px;}
+.answer{font-family:${ff};font-size:${resolvedAnswerSize}px;font-weight:400;line-height:1.35;width:100%;}
+.answer-text{
+  color:${textColor};
+  background:rgba(28,28,30,0.82);
+  -webkit-box-decoration-break:clone;
+  box-decoration-break:clone;
+  padding:6px 18px;
+  border-radius:7px;
+  display:inline;
+}
+.answer-text span{color:${highlightColor};}
+</style></head>
+<body>
+${hasBg ? buildStoryBgLayers(bgOptions!.backgroundUrl, bgOptions!.overlayColor) : ''}
+<div class="content">
+${buildCaixinhaSticker(question, true, stickerFontSize)}
+<div class="answer"><span class="answer-text">${escapeHtml(answer).replace(/~([^~]+)~/g, `<span>$1</span>`)}</span></div>
+</div>
+</body></html>`;
+}
+
+export interface GeneratedImageSlide {
+  text: string;
+  caption: string;
+}
+
+export async function generateImagePostContent(input: {
+  transcript?: string;
+  caption?: string;
+  imageUrls?: string[];
+  slideCount?: number;
+  tone?: string;
+}): Promise<{ slides: string[]; caption: string }> {
+  const client = getClient();
+  const slideCount = input.slideCount ?? 1;
+
+  const system = `Você é um especialista em conteúdo visual para médicos residentes e estudantes de medicina brasileiros.
+Sua missão: gerar textos curtos e impactantes para sobreposição em imagens de fundo — posts estáticos ou carrossel do Instagram.
+
+ENRIQUECIMENTO DE CONTEÚDO:
+- Use o conteúdo-fonte como ponto de partida, mas enriqueça com seu conhecimento médico
+- Adicione dados concretos, estatísticas, referências a guidelines ou evidências que fortaleçam o tema — mesmo que não estejam na fonte fornecida
+- Prefira um pearl clínico, dado surpreendente ou nuance prática que quem leia não esperaria — entregue mais do que apenas rephrasar o texto recebido
+
+REGRAS DOS TEXTOS:
+- Gere exatamente ${slideCount} texto(s)
+- Cada texto será exibido SOBRE uma imagem de fundo, então deve ser curto e legível
+- Máximo 200 caracteres por texto
+- Use **negrito** para termos-chave
+- Headline forte, dado concreto ou insight clínico — sem enrolação
+- PROIBIDO mencionar concorrentes: Medway, MedGrupo, Hardwork, Estratégia MED, Sanar, Jaleko
+- Tom: confiante, educativo, direto
+
+LEGENDA:
+- 3 a 5 linhas, tom envolvente
+- 8 a 12 hashtags ao final
+
+Retorne APENAS JSON válido:
+{
+  "slides": ["texto slide 1", ...],
+  "caption": "legenda completa"
+}`;
+
+  const textParts = [
+    input.transcript ? `FONTE — Transcript ou resumo:\n"${input.transcript.slice(0, 2500)}"` : '',
+    input.caption ? `Contexto — Título:\n"${input.caption.slice(0, 600)}"` : '',
+    `Tom: ${input.tone ?? 'educativo e confiante'}`,
+  ].filter(Boolean);
+
+  const images = (input.imageUrls ?? []).filter(Boolean).slice(0, 4);
+
+  const userContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: 'low' } }> = [
+    { type: 'text' as const, text: textParts.join('\n\n') },
+    ...images.map((url) => ({ type: 'image_url' as const, image_url: { url, detail: 'low' as const } })),
+  ];
+
+  if (images.length) {
+    userContent.push({ type: 'text' as const, text: 'Analise as imagens para extrair dados, textos visíveis e informações relevantes.' });
+  }
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userContent },
+    ],
+  });
+
+  const raw = JSON.parse(response.choices[0].message.content ?? '{}') as { slides?: string[]; caption?: string };
+  return { slides: raw.slides ?? [], caption: raw.caption ?? '' };
+}
+
+export type ImageOverlayVisualInput = {
+  fontId?: ImagePostOverlayFont;
+  bandStyle?: ImagePostBandStyle;
+  bandColor?: string;
+  bandTextColor?: string;
+  overlayBodyColor?: string;
+  overlayStrongColor?: string;
+  previewImageOnly?: boolean;
+};
+
+const OVERLAY_FONT_LINK: Record<ImagePostOverlayFont, string> = {
+  inter: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+  montserrat: "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap",
+  playfair: "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&display=swap",
+  'dm-sans': "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap",
+  lora: "https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&display=swap",
+  oswald: "https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&display=swap",
+};
+
+const OVERLAY_FONT_FAMILY: Record<ImagePostOverlayFont, string> = {
+  inter: "'Inter',sans-serif",
+  montserrat: "'Montserrat',sans-serif",
+  playfair: "'Playfair Display',serif",
+  'dm-sans': "'DM Sans',sans-serif",
+  lora: "'Lora',serif",
+  oswald: "'Oswald',sans-serif",
+};
+
+function overlayFontLinkHref(fontId: ImagePostOverlayFont): string {
+  return OVERLAY_FONT_LINK[fontId] ?? OVERLAY_FONT_LINK.inter;
+}
+
+function overlayFontFamilyCss(fontId: ImagePostOverlayFont): string {
+  return OVERLAY_FONT_FAMILY[fontId] ?? OVERLAY_FONT_FAMILY.inter;
+}
+
+export function buildStaticImagePreviewHtml(backgroundUrl: string): string {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1080px;overflow:hidden;}
+.bg{width:1080px;height:1080px;background:url('${backgroundUrl}') center/cover no-repeat;}
+</style></head>
+<body><div class="bg"></div></body></html>`;
+}
+
+function buildPanoramicBgScript(backgroundUrl: string, totalWidth: number, offsetX: number): string {
+  return `<script>(function(){
+  var bg=document.querySelector('.bg');
+  var img=new Image();
+  img.onload=function(){
+    var tw=${totalWidth},sh=1080,ox=${offsetX};
+    var sw=this.naturalWidth,ih=this.naturalHeight;
+    var scaledH=ih*(tw/sw);
+    if(scaledH>=sh){
+      var top=(scaledH-sh)/2;
+      bg.style.backgroundSize=tw+'px '+scaledH+'px';
+      bg.style.backgroundPosition='-'+ox+'px -'+top+'px';
+    }else{
+      var scaledW=sw*(sh/ih);
+      var left=ox+(scaledW-tw)/2;
+      bg.style.backgroundSize=scaledW+'px '+sh+'px';
+      bg.style.backgroundPosition='-'+left+'px 0px';
+    }
+  };
+  img.src='${backgroundUrl}';
+})();<\/script>`;
+}
+
+export function buildPanoramicImagePreviewHtml(
+  backgroundUrl: string,
+  slideIndex: number,
+  total: number,
+): string {
+  const totalWidth = total * 1080;
+  const offsetX = slideIndex * 1080;
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1080px;overflow:hidden;}
+.bg{width:1080px;height:1080px;background:url('${backgroundUrl}') -${offsetX}px 50% / ${totalWidth}px auto no-repeat;}
+</style></head>
+<body>
+<div class="bg"></div>
+${buildPanoramicBgScript(backgroundUrl, totalWidth, offsetX)}
+</body></html>`;
+}
+
+const IMAGE_STYLE_SYSTEM: Record<Exclude<ImageStyle, 'brand'>, { system: string; dalleStyle: 'natural' | 'vivid' }> = {
+  'lo-fi': {
+    dalleStyle: 'natural',
+    system: `You create DALL-E 3 prompts for Instagram post backgrounds about medical/health topics.
+Goal: casual candid photo — like a Brazilian resident took it on their phone.
+Rules:
+- Casual smartphone feel, slightly grainy, natural indoor/hospital light, imperfect composition
+- Subjects: notes on a desk, stethoscope, coffee next to a textbook, hospital hallway, resident in scrubs
+- NO text, charts, labels, watermarks
+- NOT cinematic, NOT studio lighting, NOT editorial
+- Output ONLY the English prompt (max 150 words)`,
+  },
+  'realistic': {
+    dalleStyle: 'natural',
+    system: `You create DALL-E 3 prompts for Instagram post backgrounds about medical/health topics.
+Goal: high-quality realistic photograph, professional feel but not stock-photo generic.
+Rules:
+- Style: sharp DSLR photograph, natural or soft studio lighting, clean composition
+- Subjects: medical professionals in action, clinical environments, labs, anatomy, healthcare settings
+- NO text, charts, labels, watermarks
+- Output ONLY the English prompt (max 150 words)`,
+  },
+  'illustration-3d': {
+    dalleStyle: 'vivid',
+    system: `You create DALL-E 3 prompts for 3D illustration Instagram post backgrounds about medical/health topics.
+Goal: modern 3D rendered illustration, Blender/Cinema4D aesthetic.
+Rules:
+- Style: 3D render, soft studio lighting, clean pastel or vivid color palette, smooth surfaces, subtle depth of field
+- Subjects: stylized medical objects (stethoscope, heart, DNA, pills, brain), abstract health metaphors, clean backgrounds
+- NO text, labels, watermarks
+- NOT photorealistic — clearly a 3D illustration
+- Output ONLY the English prompt (max 150 words)`,
+  },
+  'illustration-2d': {
+    dalleStyle: 'vivid',
+    system: `You create DALL-E 3 prompts for 2D flat illustration Instagram post backgrounds about medical/health topics.
+Goal: modern flat vector illustration, clean and graphic.
+Rules:
+- Style: flat design, geometric shapes, bold outlines or no outlines, limited color palette, minimal gradients, editorial illustration feel
+- Subjects: stylized medical icons, body silhouettes, abstract health concepts, clean colorful backgrounds
+- NO text, labels, watermarks
+- NOT photorealistic — clearly a 2D illustration
+- Output ONLY the English prompt (max 150 words)`,
+  },
+};
+
+async function buildDallEPrompt(
+  transcript: string,
+  caption: string,
+  slideIndex: number,
+  total: number,
+  imageStyle: ImageStyle = 'lo-fi',
+  brandColors: string[] = [],
+  brandImageUrl = '',
+  panoramic = false,
+): Promise<{ prompt: string; dalleStyle: 'natural' | 'vivid' }> {
+  const client = getClient();
+
+  const context = [
+    transcript ? `Conteúdo: "${transcript.slice(0, 800)}"` : '',
+    caption ? `Título: "${caption.slice(0, 200)}"` : '',
+    total > 1 && !panoramic ? `Slide ${slideIndex + 1} of ${total}.` : '',
+    panoramic ? 'This image will be used as a wide panoramic carousel — it must flow naturally left to right.' : '',
+  ].filter(Boolean).join('\n');
+
+  if (imageStyle === 'brand') {
+    const colorList = brandColors.slice(0, 4).join(', ') || 'no specific colors';
+    const imageContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: 'low' } }> = [
+      {
+        type: 'text',
+        text: `Brand colors: ${colorList}\n\nContent to illustrate:\n${context || 'Medical education content'}`,
+      },
+    ];
+    if (brandImageUrl) {
+      imageContent.splice(1, 0, { type: 'image_url', image_url: { url: brandImageUrl, detail: 'low' } });
+    }
+
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.7,
+      messages: [
+        {
+          role: 'system',
+          content: `You create DALL-E 3 prompts for Instagram post backgrounds about medical/health topics, tailored to a specific brand.
+${brandImageUrl ? 'Analyze the brand profile image provided to understand the visual identity, color palette, style, and mood.' : ''}
+Use the brand colors as the dominant tones of the image.
+Rules:
+- Style: match the brand aesthetic (modern, clean, professional, or illustrative — infer from the profile image and colors)
+- Incorporate the brand colors prominently as the main palette
+- Subjects related to the content topic and brand identity
+- NO text, charts, labels, watermarks
+- ${panoramic ? 'Wide horizontal composition that flows naturally left to right.' : 'Square composition (1:1).'}
+- Output ONLY the English prompt (max 200 words)`,
+        },
+        { role: 'user', content: imageContent },
+      ],
+    });
+
+    const prompt = response.choices[0].message.content?.trim()
+      ?? `Professional medical background using colors ${colorList}`;
+    return { prompt, dalleStyle: 'natural' };
+  }
+
+  const { system, dalleStyle } = IMAGE_STYLE_SYSTEM[imageStyle];
+  const panoramicSuffix = panoramic
+    ? '\n- Wide horizontal composition, continuous scene flowing left to right, panoramic 16:9 ratio'
+    : '';
+
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+    messages: [
+      { role: 'system', content: system + panoramicSuffix },
+      { role: 'user', content: context || 'Medical education content' },
+    ],
+  });
+
+  const prompt = response.choices[0].message.content?.trim() ?? 'Medical environment, natural lighting, clean composition';
+  return { prompt, dalleStyle };
+}
+
+export async function generateBackgroundImages(
+  transcript: string,
+  caption: string,
+  count: number,
+  imageStyle: ImageStyle = 'lo-fi',
+  brandColors: string[] = [],
+  brandImageUrl = '',
+): Promise<string[]> {
+  const client = getClient();
+  const urls: string[] = [];
+
+  for (let i = 0; i < count; i++) {
+    try {
+      const { prompt, dalleStyle } = await buildDallEPrompt(transcript, caption, i, count, imageStyle, brandColors, brandImageUrl);
+      const response = await client.images.generate({
+        model: 'dall-e-3',
+        prompt,
+        n: 1,
+        size: '1024x1024',
+        quality: 'standard',
+        style: dalleStyle,
+      });
+      const url = response.data?.[0]?.url;
+      if (url) urls.push(url);
+    } catch {
+      // non-fatal per slide
+    }
+  }
+
+  return urls;
+}
+
+export async function generatePanoramicBackground(
+  transcript: string,
+  caption: string,
+  imageStyle: ImageStyle = 'lo-fi',
+  brandColors: string[] = [],
+  brandImageUrl = '',
+): Promise<string | null> {
+  const client = getClient();
+  try {
+    const { prompt, dalleStyle } = await buildDallEPrompt(transcript, caption, 0, 1, imageStyle, brandColors, brandImageUrl, true);
+    const response = await client.images.generate({
+      model: 'dall-e-3',
+      prompt,
+      n: 1,
+      size: '1792x1024',
+      quality: 'standard',
+      style: dalleStyle,
+    });
+    return response.data?.[0]?.url ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function buildBottomBandHtml(
+  text: string,
+  profileName: string,
+  profileImageUrl: string,
+  bodyFontSize: number,
+  fontFamily: string,
+  accent: string,
+  bandText: string,
+  strongColor: string,
+): string {
+  const formatted = escapeHtml(text).replace(/\*\*([^*]+)\*\*/g, (_, m: string) => `<strong style="color:${strongColor};">${escapeHtml(m)}</strong>`);
+
+  const initial = (profileName || 'M')[0].toUpperCase();
+  const avatarEl = profileImageUrl
+    ? `<img src="${profileImageUrl}" style="width:80px;height:80px;border-radius:50%;object-fit:cover;flex-shrink:0;border:3px solid ${accent};display:block;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"/><div style="display:none;width:80px;height:80px;border-radius:50%;background:${accent};align-items:center;justify-content:center;font-size:32px;font-weight:700;color:#fff;flex-shrink:0;border:3px solid ${accent};">${initial}</div>`
+    : `<div style="width:80px;height:80px;border-radius:50%;background:${accent};display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;color:#fff;flex-shrink:0;border:3px solid ${accent};">${initial}</div>`;
+
+  return `<div class="band">
+  <div class="band-text">${formatted}</div>
+  <div class="band-profile">
+    ${avatarEl}
+    <span class="band-name">${escapeHtml(profileName)}</span>
+  </div>
+</div>`;
+}
+
+function buildBottomBandCss(
+  bandStyle: ImagePostBandStyle,
+  bandColor: string,
+  bandTextColor: string,
+  bodyFontSize: number,
+  fontFamily: string,
+): string {
+  const safeColor = bandColor?.trim() || '#ffffff';
+  const isGradient = bandStyle === 'gradient';
+  const bg = isGradient
+    ? `linear-gradient(to bottom, transparent 0%, ${safeColor} 45%)`
+    : safeColor;
+  const paddingTop = isGradient ? '100px' : '40px';
+
+  return `
+.band{position:absolute;bottom:0;left:0;right:0;background:${bg};display:flex;flex-direction:column;justify-content:flex-end;padding:${paddingTop} 52px 48px;}
+.band-text{font-size:${bodyFontSize}px;font-weight:600;color:${bandTextColor};line-height:1.45;margin-bottom:32px;font-family:${fontFamily};}
+.band-text strong{font-weight:700;}
+.band-profile{display:flex;align-items:center;gap:20px;}
+.band-name{font-size:28px;font-weight:600;color:${bandTextColor};letter-spacing:-0.2px;font-family:${fontFamily};}`;
+}
+
+export function buildPanoramicSlideHtml(
+  text: string,
+  backgroundUrl: string,
+  mode: DisplayMode,
+  bodyFontSize: number,
+  brandColors: string[],
+  slideIndex: number,
+  total: number,
+  profileName = '',
+  profileImageUrl = '',
+  visual?: ImageOverlayVisualInput,
+): string {
+  if (visual?.previewImageOnly) {
+    return buildPanoramicImagePreviewHtml(backgroundUrl, slideIndex, total);
+  }
+  const fontId = visual?.fontId ?? 'montserrat';
+  const fontHref = overlayFontLinkHref(fontId);
+  const fontFamily = overlayFontFamilyCss(fontId);
+  const accent = visual?.overlayStrongColor?.trim() || brandColors[0] || '#6C63FF';
+  const bandStyle = visual?.bandStyle ?? 'solid';
+  const bandColor = visual?.bandColor ?? '#ffffff';
+  const bandText = visual?.bandTextColor ?? '#111111';
+
+  const totalWidth = total * 1080;
+  const offsetX = slideIndex * 1080;
+
+  const counter = total > 1
+    ? `<div style="position:absolute;top:32px;right:36px;font-size:24px;font-weight:500;color:rgba(255,255,255,0.9);font-family:${fontFamily};text-shadow:0 1px 6px rgba(0,0,0,0.5);">${slideIndex + 1} / ${total}</div>`
+    : '';
+
+  const band = buildBottomBandHtml(text, profileName, profileImageUrl, bodyFontSize, fontFamily, accent, bandText, accent);
+  const bandCss = buildBottomBandCss(bandStyle, bandColor, bandText, bodyFontSize, fontFamily);
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="${fontHref}" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1080px;overflow:hidden;}
+.bg{width:1080px;height:1080px;background:url('${backgroundUrl}') -${offsetX}px 50% / ${totalWidth}px auto no-repeat;position:relative;}
+${bandCss}
+</style></head>
+<body>
+<div class="bg">
+  ${counter}
+  ${band}
+</div>
+${buildPanoramicBgScript(backgroundUrl, totalWidth, offsetX)}
+</body></html>`;
+}
+
+export function buildImageOverlayHtml(
+  text: string,
+  backgroundUrl: string,
+  mode: DisplayMode,
+  bodyFontSize: number,
+  brandColors: string[],
+  slideIndex: number,
+  total: number,
+  profileName = '',
+  profileImageUrl = '',
+  visual?: ImageOverlayVisualInput,
+): string {
+  if (visual?.previewImageOnly) {
+    return buildStaticImagePreviewHtml(backgroundUrl);
+  }
+  const fontId = visual?.fontId ?? 'montserrat';
+  const fontHref = overlayFontLinkHref(fontId);
+  const fontFamily = overlayFontFamilyCss(fontId);
+  const accent = visual?.overlayStrongColor?.trim() || brandColors[0] || '#6C63FF';
+  const bandStyle = visual?.bandStyle ?? 'solid';
+  const bandColor = visual?.bandColor ?? '#ffffff';
+  const bandText = visual?.bandTextColor ?? '#111111';
+
+  const counter = total > 1
+    ? `<div style="position:absolute;top:32px;right:36px;font-size:24px;font-weight:500;color:rgba(255,255,255,0.9);font-family:${fontFamily};text-shadow:0 1px 6px rgba(0,0,0,0.5);">${slideIndex + 1} / ${total}</div>`
+    : '';
+
+  const band = buildBottomBandHtml(text, profileName, profileImageUrl, bodyFontSize, fontFamily, accent, bandText, accent);
+  const bandCss = buildBottomBandCss(bandStyle, bandColor, bandText, bodyFontSize, fontFamily);
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=1080,initial-scale=1.0"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="${fontHref}" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1080px;height:1080px;overflow:hidden;}
+.bg{width:1080px;height:1080px;background:url('${backgroundUrl}') center/cover no-repeat;position:relative;}
+${bandCss}
+</style></head>
+<body>
+<div class="bg">
+  ${counter}
+  ${band}
+</div>
+</body></html>`;
 }

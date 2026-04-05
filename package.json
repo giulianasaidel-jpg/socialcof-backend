@@ -7,7 +7,8 @@
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "cron:tick": "ts-node-dev --transpile-only --exit-child src/scripts/runScrapeTicksOnce.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1022.0",
@@ -28,6 +29,7 @@
     "openai": "^6.33.0",
     "puppeteer": "^24.40.0",
     "rss-parser": "^3.13.0",
+    "socialcof-backend": "link:",
     "zod": "^3.23.8"
   },
   "pnpm": {

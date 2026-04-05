@@ -1,14 +1,14 @@
 import { InstagramAccount } from '../models/InstagramAccount';
 import { InstagramSyncLog } from '../models/InstagramSyncLog';
-import { Post } from '../models/Post';
-import { scrapeProfile, scrapeRecentPosts, toPostFormat } from '../services/apifyInstagram';
-import { uploadImageFromUrl, uploadCarouselImages } from '../services/s3';
-import { processReel } from '../services/videoProcessor';
-import { analyseImage, analyseCarousel } from '../services/visionAnalysis';
+import { scrapeProfile } from '../services/apifyInstagram';
+import { scrapeAndPersistPosts, scrapeAndPersistReels } from '../services/instagramScrapeActions';
 
-/**
- * Scrapes and persists the public profile data for a single account.
- */
+export const BETWEEN_IG_APIFY_STEPS_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function syncAccountProfile(account: InstanceType<typeof InstagramAccount>): Promise<void> {
   const profile = await scrapeProfile(account.handle);
 
@@ -27,129 +27,77 @@ export async function syncAccountProfile(account: InstanceType<typeof InstagramA
   console.log(`[instagramSync] ✓ profile ${account.handle} — ${profile.followersCount} followers`);
 }
 
-/**
- * Scrapes and upserts the recent posts for a single account.
- */
 export async function syncAccountPosts(account: InstanceType<typeof InstagramAccount>): Promise<void> {
-  const posts = await scrapeRecentPosts(account.handle, 50);
-
-  for (const post of posts) {
-    const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
-    const thumbnailUrl =
-      post.displayUrl && post.type !== 'Video'
-        ? await uploadImageFromUrl(post.displayUrl, `instagram/${account.handle}/${post.id}.jpg`).catch(() => null)
-        : null;
-
-    const carouselImages =
-      post.type === 'Sidecar' && post.carouselDisplayUrls.length
-        ? await uploadCarouselImages(post.carouselDisplayUrls, account.handle, post.id)
-        : [];
-
-    const transcript = await (async () => {
-      if (post.type === 'Sidecar' && carouselImages.length) {
-        return analyseCarousel(carouselImages).catch(() => null);
-      }
-      if (post.type === 'Image' && thumbnailUrl) {
-        return analyseImage(thumbnailUrl).catch(() => null);
-      }
-      return null;
-    })();
-
-    await Post.findOneAndUpdate(
-      { instagramPostId: post.id },
-      {
-        $set: {
-          accountId: account._id,
-          instagramPostId: post.id,
-          title,
-          postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
-          format: toPostFormat(post.type),
-          likes: post.likesCount,
-          comments: post.commentsCount,
-          postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
-          ...(thumbnailUrl && { thumbnailUrl }),
-          ...(carouselImages.length && { carouselImages }),
-          ...(transcript && { transcript }),
-          syncedAt: new Date(),
-        },
-      },
-      { upsert: true, new: true },
-    );
-  }
-
-  account.lastSyncAt = new Date();
-  await account.save();
+  const result = await scrapeAndPersistPosts(account, 5);
 
   await InstagramSyncLog.create({
     accountId: account._id,
     at: new Date(),
     level: 'ok',
-    message: `[cron] Posts synced — ${posts.length} posts`,
+    message: `[cron] Posts synced — ${result.total} posts`,
   });
 
-  console.log(`[instagramSync] ✓ posts ${account.handle} — ${posts.length} posts`);
+  console.log(`[instagramSync] ✓ posts ${account.handle} — ${result.total} posts`);
 }
 
-/**
- * Downloads, compresses and transcribes Reels for a single account.
- * Skips reels that already have a transcript saved.
- */
 export async function syncAccountReels(account: InstanceType<typeof InstagramAccount>): Promise<void> {
-  const posts = await scrapeRecentPosts(account.handle, 20);
-  const reels = posts.filter((p) => p.type === 'Video' && p.videoUrl);
-
-  let processed = 0;
-
-  for (const post of reels) {
-    const existing = await Post.findOne({ instagramPostId: post.id, transcript: { $exists: true, $ne: '' } });
-    if (existing) continue;
-
-    try {
-      const { s3VideoUrl, transcript } = await processReel(post.videoUrl!, account.handle, post.id);
-      const title = post.caption?.split('\n')[0]?.slice(0, 200) ?? post.shortCode;
-
-      await Post.findOneAndUpdate(
-        { instagramPostId: post.id },
-        {
-          $set: {
-            accountId: account._id,
-            instagramPostId: post.id,
-            title,
-            postedAt: post.timestamp ? new Date(post.timestamp) : new Date(),
-            format: 'Reels',
-            likes: post.likesCount,
-            comments: post.commentsCount,
-            postUrl: post.url ?? `https://www.instagram.com/p/${post.shortCode}/`,
-            ...(s3VideoUrl && { videoUrl: s3VideoUrl }),
-            ...(transcript && { transcript }),
-            syncedAt: new Date(),
-          },
-        },
-        { upsert: true, new: true },
-      );
-
-      processed++;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`[instagramSync] ✗ reel ${post.id}:`, message);
-    }
-  }
+  const result = await scrapeAndPersistReels(account, 5, { skipIfTranscribed: true });
+  const ok = result.reels.filter((r) => r.status === 'ok').length;
 
   await InstagramSyncLog.create({
     accountId: account._id,
     at: new Date(),
     level: 'ok',
-    message: `[cron] Reels processed — ${processed}/${reels.length}`,
+    message: `[cron] Reels processed — ${ok}/${result.total}`,
   });
 
-  console.log(`[instagramSync] ✓ reels ${account.handle} — ${processed}/${reels.length} transcribed`);
+  console.log(`[instagramSync] ✓ reels ${account.handle} — ${ok}/${result.total} transcribed`);
 }
 
-/**
- * Daily cron job: scrapes profile + posts for every account with ingestEnabled.
- */
+export async function syncInstagramAccountDailyBundle(
+  account: InstanceType<typeof InstagramAccount>,
+  gapMs: number,
+): Promise<void> {
+  const logErr = async (step: string, message: string) => {
+    await InstagramSyncLog.create({
+      accountId: account._id,
+      at: new Date(),
+      level: 'erro',
+      message: `[cron] ${step}: ${message}`,
+    });
+  };
+
+  try {
+    await syncAccountProfile(account);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[instagramSync] ✗ profile ${account.handle}:`, message);
+    await logErr('profile', message);
+  }
+
+  if (gapMs > 0) await sleep(gapMs);
+
+  try {
+    await syncAccountPosts(account);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[instagramSync] ✗ posts ${account.handle}:`, message);
+    await logErr('posts', message);
+  }
+
+  if (gapMs > 0) await sleep(gapMs);
+
+  try {
+    await syncAccountReels(account);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[instagramSync] ✗ reels ${account.handle}:`, message);
+    await logErr('reels', message);
+  }
+}
+
 export async function runInstagramSyncJob(): Promise<void> {
-  console.log('[instagramSync] Starting daily sync...');
+  console.log('[instagramSync] Starting full manual sync (all ingestEnabled accounts, sequential)...');
 
   const accounts = await InstagramAccount.find({ ingestEnabled: true });
 
@@ -161,29 +109,7 @@ export async function runInstagramSyncJob(): Promise<void> {
   console.log(`[instagramSync] Found ${accounts.length} account(s).`);
 
   for (const account of accounts) {
-    try {
-      await syncAccountProfile(account);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`[instagramSync] ✗ profile ${account.handle}:`, message);
-      await InstagramSyncLog.create({ accountId: account._id, at: new Date(), level: 'erro', message: `[cron] profile: ${message}` });
-    }
-
-    try {
-      await syncAccountPosts(account);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`[instagramSync] ✗ posts ${account.handle}:`, message);
-      await InstagramSyncLog.create({ accountId: account._id, at: new Date(), level: 'erro', message: `[cron] posts: ${message}` });
-    }
-
-    try {
-      await syncAccountReels(account);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`[instagramSync] ✗ reels ${account.handle}:`, message);
-      await InstagramSyncLog.create({ accountId: account._id, at: new Date(), level: 'erro', message: `[cron] reels: ${message}` });
-    }
+    await syncInstagramAccountDailyBundle(account, 0);
   }
 
   console.log('[instagramSync] Done.');

@@ -1,4 +1,5 @@
 import RSSParser from 'rss-parser';
+import { Types } from 'mongoose';
 import { MedicalNews, NewsCategory, NewsLanguage, NewsSpecialty } from '../models/MedicalNews';
 import { MedNewsSource } from '../models/MedNewsSource';
 import { fetchPubMedArticles } from '../services/pubmed';
@@ -6,6 +7,8 @@ import { scrapeEbserh, scrapeEnare, scrapeResidenciaMedica } from '../services/m
 import { scrapeNewsSite, enrichItems } from '../services/apifyNewsScraper';
 import { broadcastNewsItem, broadcastBulkProgress } from '../services/newsEventEmitter';
 import { IMedNewsSource } from '../models/MedNewsSource';
+
+let apifyNewsTickBusy = false;
 
 const parser = new RSSParser();
 
@@ -46,9 +49,9 @@ const RSS_SOURCES: RSSSource[] = [
 
 const PUBMED_QUERIES = [
   { query: 'brazil medical residency OR residencia medica', source: 'PubMed - Residência Médica', category: 'education' as NewsCategory, language: 'en' as NewsLanguage, specialty: 'residencia' as NewsSpecialty },
+  { query: 'medical education assessment OSCE', source: 'PubMed - Educação Médica', category: 'education' as NewsCategory, language: 'en' as NewsLanguage, specialty: 'residencia' as NewsSpecialty },
   { query: 'clinical guidelines 2025 2026', source: 'PubMed - Diretrizes', category: 'guidelines' as NewsCategory, language: 'en' as NewsLanguage, specialty: 'clinica_medica' as NewsSpecialty },
   { query: 'brazil public health policy', source: 'PubMed - Saúde Pública BR', category: 'research' as NewsCategory, language: 'en' as NewsLanguage, specialty: 'preventiva' as NewsSpecialty },
-  { query: 'medical education assessment OSCE', source: 'PubMed - Educação Médica', category: 'education' as NewsCategory, language: 'en' as NewsLanguage, specialty: 'residencia' as NewsSpecialty },
 ];
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -103,7 +106,12 @@ async function upsertNews(
 }
 
 async function fetchRSSSources(): Promise<void> {
-  for (const { source, url, category, language, specialty } of RSS_SOURCES) {
+  const ordered = [...RSS_SOURCES].sort((a, b) => {
+    const ar = a.specialty === 'residencia' ? 0 : 1;
+    const br = b.specialty === 'residencia' ? 0 : 1;
+    return ar - br;
+  });
+  for (const { source, url, category, language, specialty } of ordered) {
     try {
       const feed = await parser.parseURL(url);
       let count = 0;
@@ -220,24 +228,60 @@ export async function scrapeOneSource(source: IMedNewsSource): Promise<SourceScr
   return { sourceName: source.name, scraped: raw.length, newItems: enriched.length, saved };
 }
 
-async function fetchApifySources(): Promise<void> {
-  const sources = await MedNewsSource.find({ method: 'html', isActive: true }).sort({ priority: 1 });
-  for (const source of sources) {
+export async function runApifyNewsRoundRobinTick(): Promise<void> {
+  if (apifyNewsTickBusy) return;
+  apifyNewsTickBusy = true;
+  try {
+    const epoch = new Date(0);
+    const picked = await MedNewsSource.aggregate<{ _id: Types.ObjectId }>([
+      { $match: { method: 'html', isActive: true } },
+      {
+        $addFields: {
+          _staleAt: { $ifNull: ['$lastScrapedAt', epoch] },
+          _afterResidency: { $cond: [{ $eq: ['$specialty', 'residencia'] }, 0, 1] },
+        },
+      },
+      { $sort: { _staleAt: 1, _afterResidency: 1, priority: 1, _id: 1 } },
+      { $limit: 1 },
+      { $project: { _id: 1 } },
+    ]);
+    const source = picked[0]?._id ? await MedNewsSource.findById(picked[0]._id) : null;
+    if (!source) return;
+
+    console.log(
+      `[bulkScrape] stalest — ${source.name} (lastScrapedAt=${source.lastScrapedAt?.toISOString() ?? 'never'})`,
+    );
+
     try {
       const result = await scrapeOneSource(source);
-      console.log(`[medicalNews] Apify ${result.sourceName}: ${result.newItems} new / ${result.scraped} scraped`);
+      console.log(`[bulkScrape] ${result.sourceName}: ${result.newItems} new / ${result.scraped} scraped`);
     } catch (err) {
-      console.error(`[medicalNews] Apify ${source.name} failed:`, err instanceof Error ? err.message : err);
+      console.error(`[bulkScrape] ${source.name} failed:`, err instanceof Error ? err.message : err);
+      broadcastBulkProgress({
+        source: source.name,
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
+  } finally {
+    apifyNewsTickBusy = false;
   }
 }
 
 /**
- * Scrapes all active html sources in parallel with a concurrency limit.
- * Broadcasts SSE progress events for each source and a final summary.
+ * Scrapes all active html sources; use concurrency 1 for fully serial Apify runs.
  */
-export async function runApifyBulkScrape(concurrency = 3): Promise<void> {
-  const sources = await MedNewsSource.find({ method: 'html', isActive: true }).sort({ priority: 1 });
+export async function runApifyBulkScrape(concurrency = 1): Promise<void> {
+  const orderedIds = await MedNewsSource.aggregate<{ _id: Types.ObjectId }>([
+    { $match: { method: 'html', isActive: true } },
+    { $addFields: { _afterResidency: { $cond: [{ $eq: ['$specialty', 'residencia'] }, 0, 1] } } },
+    { $sort: { priority: 1, _afterResidency: 1, _id: 1 } },
+    { $project: { _id: 1 } },
+  ]);
+  const idList = orderedIds.map((r) => r._id);
+  const docs = await MedNewsSource.find({ _id: { $in: idList } });
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+  const sources = idList.map((id) => byId.get(String(id))).filter(Boolean) as IMedNewsSource[];
   const total = sources.length;
   let completed = 0;
   let totalNew = 0;
@@ -269,12 +313,8 @@ export async function runMedicalNewsJob(): Promise<void> {
   console.log('[medicalNews] Starting comprehensive fetch...');
   const start = Date.now();
 
-  await Promise.allSettled([
-    fetchRSSSources(),
-    fetchPubMedSources(),
-    fetchScrapedSources(),
-    fetchApifySources(),
-  ]);
+  await fetchScrapedSources();
+  await Promise.allSettled([fetchRSSSources(), fetchPubMedSources()]);
 
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   console.log(`[medicalNews] Done in ${elapsed}s`);

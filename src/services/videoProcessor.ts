@@ -12,8 +12,6 @@ import { uploadVideoFromFile } from './s3';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-const MAX_WHISPER_BYTES = 24 * 1024 * 1024;
-
 const INSTAGRAM_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'video/mp4,video/*,*/*;q=0.8',
@@ -35,9 +33,6 @@ function tmpPath(ext: string): string {
   return path.join(os.tmpdir(), `reel_${crypto.randomBytes(8).toString('hex')}${ext}`);
 }
 
-/**
- * Downloads a video from a URL to a local temp file, following redirects.
- */
 function downloadToFile(url: string, destPath: string, headers: Record<string, string>, redirectsLeft = 5): Promise<void> {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
@@ -59,10 +54,18 @@ function downloadToFile(url: string, destPath: string, headers: Record<string, s
   });
 }
 
-/**
- * Compresses a video file using ffmpeg targeting a size under MAX_WHISPER_BYTES.
- * Uses H.264 + AAC at reduced quality to minimise file size.
- */
+function extractAudio(inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .outputOptions(['-c:a', 'aac', '-b:a', '64k'])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', reject)
+      .run();
+  });
+}
+
 function compressVideo(inputPath: string, outputPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
@@ -82,21 +85,31 @@ function compressVideo(inputPath: string, outputPath: string): Promise<void> {
   });
 }
 
-/**
- * Transcribes the audio of a video/audio file using OpenAI Whisper.
- */
-async function transcribe(filePath: string): Promise<string> {
+function transcribe(filePath: string): Promise<string> {
   if (!env.GPT_KEY) throw new Error('GPT_KEY is not configured');
   const client = new OpenAI({ apiKey: env.GPT_KEY });
 
-  const response = await client.audio.transcriptions.create({
-    model: 'whisper-1',
-    file: fs.createReadStream(filePath),
-    language: 'pt',
-    response_format: 'text',
-  });
+  return client.audio.transcriptions
+    .create({ model: 'whisper-1', file: fs.createReadStream(filePath), language: 'pt', response_format: 'text' })
+    .then((r) => (r as unknown as string).trim());
+}
 
-  return (response as unknown as string).trim();
+async function transcribeVideo(videoPath: string): Promise<string> {
+  const audioPath = tmpPath('.m4a');
+  try {
+    await extractAudio(videoPath, audioPath);
+    return await transcribe(audioPath);
+  } catch {
+    const compressedPath = tmpPath('_compressed.mp4');
+    try {
+      await compressVideo(videoPath, compressedPath);
+      return await transcribe(compressedPath);
+    } finally {
+      fs.unlink(compressedPath, () => {});
+    }
+  } finally {
+    fs.unlink(audioPath, () => {});
+  }
 }
 
 export interface ProcessedReel {
@@ -104,46 +117,27 @@ export interface ProcessedReel {
   transcript: string;
 }
 
-/**
- * Full pipeline: downloads the video, compresses if needed, uploads to S3, and transcribes with Whisper.
- * Cleans up all temp files after completion.
- */
 export async function processVideo(
   videoUrl: string,
   s3Key: string,
   downloadHeaders: Record<string, string> = INSTAGRAM_HEADERS,
 ): Promise<ProcessedReel> {
   const rawPath = tmpPath('.mp4');
-  const compressedPath = tmpPath('_compressed.mp4');
 
   try {
     await downloadToFile(videoUrl, rawPath, downloadHeaders);
 
-    const rawSize = (await fs.promises.stat(rawPath)).size;
-    const needsCompression = rawSize > MAX_WHISPER_BYTES;
-
-    const videoPath = needsCompression ? compressedPath : rawPath;
-
-    if (needsCompression) {
-      await compressVideo(rawPath, compressedPath);
-    }
-
     const [s3VideoUrl, transcript] = await Promise.all([
-      uploadVideoFromFile(videoPath, s3Key).catch(() => null),
-      transcribe(videoPath),
+      uploadVideoFromFile(rawPath, s3Key).catch(() => null),
+      transcribeVideo(rawPath).catch(() => ''),
     ]);
 
     return { s3VideoUrl, transcript };
   } finally {
-    for (const p of [rawPath, compressedPath]) {
-      fs.unlink(p, () => {});
-    }
+    fs.unlink(rawPath, () => {});
   }
 }
 
-/**
- * Convenience wrapper for processing Instagram reels.
- */
 export async function processReel(videoUrl: string, handle: string, postId: string): Promise<ProcessedReel> {
   return processVideo(videoUrl, `instagram/${handle}/${postId}.mp4`, INSTAGRAM_HEADERS);
 }
