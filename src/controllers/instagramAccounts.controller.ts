@@ -172,6 +172,7 @@ function toResponse(account: InstanceType<typeof InstagramAccount>) {
     profilePicS3Url: account.profilePicS3Url ?? null,
     brandColors: account.brandColors ?? [],
     referenceImages: account.referenceImages ?? [],
+    brandPostImages: account.brandPostImages ?? [],
     relatedInstagramAccountIds: (account.relatedInstagramAccountIds ?? []).map((oid) => oid.toString()),
     relatedTikTokAccountIds: (account.relatedTikTokAccountIds ?? []).map((oid) => oid.toString()),
     relatedMedNewsSourceIds: (account.relatedMedNewsSourceIds ?? []).map((oid) => oid.toString()),
@@ -1199,4 +1200,39 @@ export async function deleteReferenceImage(req: Request, res: Response): Promise
   await account.save();
 
   res.json({ referenceImages: account.referenceImages });
+}
+
+export async function uploadBrandPostImages(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const files = req.files as Express.Multer.File[] | undefined;
+  if (!files?.length) { res.status(400).json({ message: 'No files uploaded (field: files)' }); return; }
+
+  const uploaded = await Promise.all(
+    files.map(async (file, i) => {
+      const ext = file.mimetype.split('/')[1] ?? 'jpg';
+      const key = `branding/${account.handle}/post_${Date.now()}_${i}.${ext}`;
+      return uploadBuffer(file.buffer, key, file.mimetype);
+    }),
+  );
+
+  const newUrls = uploaded.filter((u): u is string => u !== null);
+  account.brandPostImages = [...(account.brandPostImages ?? []), ...newUrls];
+  await account.save();
+
+  res.json({ added: newUrls.length, brandPostImages: account.brandPostImages });
+}
+
+export async function deleteBrandPostImage(req: Request, res: Response): Promise<void> {
+  const account = await InstagramAccount.findOne({ externalId: req.params.id });
+  if (!account) { res.status(404).json({ message: 'Account not found' }); return; }
+
+  const { url } = req.body as { url?: string };
+  if (!url) { res.status(400).json({ message: 'url is required' }); return; }
+
+  account.brandPostImages = (account.brandPostImages ?? []).filter((u) => u !== url);
+  await account.save();
+
+  res.json({ brandPostImages: account.brandPostImages });
 }

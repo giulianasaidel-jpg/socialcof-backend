@@ -17,6 +17,7 @@ export interface IInstagramAccount extends Document {
   profilePicS3Url?: string;
   brandColors: string[];
   referenceImages: string[];
+  brandPostImages: string[];
   relatedInstagramAccountIds: Types.ObjectId[];
   relatedTikTokAccountIds: Types.ObjectId[];
   relatedMedNewsSourceIds: Types.ObjectId[];
@@ -46,6 +47,7 @@ const instagramAccountSchema = new Schema<IInstagramAccount>(
     profilePicS3Url: { type: String },
     brandColors: { type: [String], default: [] },
     referenceImages: { type: [String], default: [] },
+    brandPostImages: { type: [String], default: [] },
     relatedInstagramAccountIds: { type: [Schema.Types.ObjectId], ref: 'InstagramAccount', default: [] },
     relatedTikTokAccountIds: { type: [Schema.Types.ObjectId], ref: 'TikTokAccount', default: [] },
     relatedMedNewsSourceIds: { type: [Schema.Types.ObjectId], ref: 'MedNewsSource', default: [] },

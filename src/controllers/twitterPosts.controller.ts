@@ -6,7 +6,7 @@ import { Post } from '../models/Post';
 import { MedicalNews } from '../models/MedicalNews';
 import { TikTokPost } from '../models/TikTokPost';
 import { InstagramStory } from '../models/InstagramStory';
-import { generateSlidesFromSource, buildCarouselHtmls, isMedCofCompetitorNewsSource } from '../services/twitterPostGenerator';
+import { generateSlidesFromSource, enrichSocialSourceIfThin, buildCarouselHtmls, isMedCofCompetitorNewsSource } from '../services/twitterPostGenerator';
 import { streamSlidesAsZip, streamSlideAsPng } from '../services/slideExporter';
 import type { DisplayMode, ITwitterLikePost } from '../models/TwitterLikePost';
 
@@ -269,6 +269,9 @@ export async function generateTwitterPost(req: Request, res: Response): Promise<
     let generatedCaption = '';
 
     if (!resolvedTexts.length) {
+      const enriched = await enrichSocialSourceIfThin({ transcript: resolvedTranscript, caption: resolvedCaption });
+      resolvedTranscript = enriched.transcript;
+      resolvedCaption = enriched.caption;
       const generated = await generateSlidesFromSource({
         transcript: resolvedTranscript,
         caption: resolvedCaption,
@@ -339,7 +342,7 @@ export async function exportTwitterSlide(req: Request, res: Response): Promise<v
   const filename = `slide-${index + 1}-${post._id.toString()}`;
 
   try {
-    await streamSlideAsPng(post.slideHtmls[index], filename, res);
+    await streamSlideAsPng(post.slideHtmls[index], filename, res, 560, 560);
   } catch (err) {
     if (!res.headersSent) {
       res.status(502).json({ message: 'Export failed', error: err instanceof Error ? err.message : 'Unknown error' });
@@ -358,7 +361,7 @@ export async function exportTwitterPost(req: Request, res: Response): Promise<vo
   const filename = `slides-${post._id.toString()}`;
 
   try {
-    await streamSlidesAsZip(post.slideHtmls, filename, res);
+    await streamSlidesAsZip(post.slideHtmls, filename, res, 560, 560);
   } catch (err) {
     if (!res.headersSent) {
       res.status(502).json({ message: 'Export failed', error: err instanceof Error ? err.message : 'Unknown error' });

@@ -9,6 +9,7 @@ import { TikTokPost } from '../models/TikTokPost';
 import { InstagramStory } from '../models/InstagramStory';
 import {
   generateImagePostContent,
+  enrichSocialSourceIfThin,
   buildImageOverlayHtml,
   buildPanoramicSlideHtml,
   type ImageOverlayVisualInput,
@@ -126,6 +127,8 @@ export async function generateImagePostEndpoint(req: Request, res: Response): Pr
     bandTextColor,
     overlayBodyColor,
     overlayStrongColor,
+    brandPostImageIndex,
+    brandPostImageUrl,
   } = req.body as {
     accountId?: string;
     productId?: string;
@@ -150,6 +153,8 @@ export async function generateImagePostEndpoint(req: Request, res: Response): Pr
     bandTextColor?: string;
     overlayBodyColor?: string;
     overlayStrongColor?: string;
+    brandPostImageIndex?: number;
+    brandPostImageUrl?: string;
   };
 
   if (!accountId || !productId) {
@@ -218,6 +223,9 @@ export async function generateImagePostEndpoint(req: Request, res: Response): Pr
     const resolvedSlideCount = slideCount ?? backgroundUrls?.length ?? 1;
 
     if (!texts.length) {
+      const enriched = await enrichSocialSourceIfThin({ transcript: resolvedTranscript, caption: resolvedCaption });
+      resolvedTranscript = enriched.transcript;
+      resolvedCaption = enriched.caption;
       const generated = await generateImagePostContent({
         transcript: resolvedTranscript,
         caption: resolvedCaption,
@@ -251,15 +259,26 @@ export async function generateImagePostEndpoint(req: Request, res: Response): Pr
         resolvedBackgrounds = backgroundUrls;
       }
     } else {
-      if (!env.UNSPLASH_ACCESS_KEY) {
+      const postLib = account.brandPostImages ?? [];
+      let fromBrand = '';
+      const urlPick = typeof brandPostImageUrl === 'string' ? brandPostImageUrl.trim() : '';
+      if (urlPick && postLib.includes(urlPick)) fromBrand = urlPick;
+      else if (brandPostImageIndex !== undefined && Number.isInteger(brandPostImageIndex) && brandPostImageIndex >= 0 && brandPostImageIndex < postLib.length) {
+        fromBrand = (postLib[brandPostImageIndex] ?? '').trim();
+      }
+      if (fromBrand) {
+        resolvedBackgrounds = Array.from({ length: texts.length }, () => fromBrand);
+      } else if (!env.UNSPLASH_ACCESS_KEY) {
         res.status(503).json({
-          message: 'Automatic background images use Unsplash. Set UNSPLASH_ACCESS_KEY or pass backgroundUrls.',
+          message:
+            'Sem fundos: defina UNSPLASH_ACCESS_KEY, envie backgroundUrls[], ou use brandPostImageIndex / brandPostImageUrl (imagem em branding do perfil).',
         });
         return;
+      } else {
+        const web = await fetchWebBackgroundUrls(resolvedTranscript, resolvedCaption, texts.length, isPanoramic);
+        imageSearchQuery = web.query;
+        resolvedBackgrounds = web.urls;
       }
-      const web = await fetchWebBackgroundUrls(resolvedTranscript, resolvedCaption, texts.length, isPanoramic);
-      imageSearchQuery = web.query;
-      resolvedBackgrounds = web.urls;
     }
 
     if (!resolvedBackgrounds.length || resolvedBackgrounds.some((u) => !u)) {

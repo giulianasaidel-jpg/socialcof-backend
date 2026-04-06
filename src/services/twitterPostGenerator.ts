@@ -49,6 +49,75 @@ export interface GeneratedSlides {
   caption: string;
 }
 
+export type EnrichSocialSourceResult = {
+  transcript: string;
+  caption: string;
+  enriched: boolean;
+};
+
+function combinedSourceLength(transcript: string, caption: string): { chars: number; words: number; combined: string } {
+  const combined = [caption.trim(), transcript.trim()].filter(Boolean).join('\n\n');
+  const words = combined.split(/\s+/).filter((w) => w.length > 0).length;
+  return { chars: combined.length, words, combined };
+}
+
+function sourceNeedsModelEnrichment(chars: number, words: number): boolean {
+  if (chars < 320 || words < 45) return true;
+  if (chars < 750 && words < 85) return true;
+  return false;
+}
+
+export async function enrichSocialSourceIfThin(input: {
+  transcript?: string;
+  caption?: string;
+}): Promise<EnrichSocialSourceResult> {
+  const caption = (input.caption ?? '').trim();
+  const transcript = (input.transcript ?? '').trim();
+  const { chars, words, combined } = combinedSourceLength(transcript, caption);
+
+  if (!combined || !env.GPT_KEY || !sourceNeedsModelEnrichment(chars, words)) {
+    return { transcript, caption, enriched: false };
+  }
+
+  const system = `Você é editor médico sênior apoiando redação de conteúdo educativo para médicos residentes e estudantes de medicina no Brasil.
+
+A fonte abaixo é CURTA ou INSUFICIENTE para gerar posts assertivos. Sua tarefa: produzir um BRIEFING de apoio em português que o próximo passo (outro modelo) usará para escrever slides ou stories.
+
+REGRAS:
+- Use seu conhecimento médico geral, consenso de diretrizes amplamente aceitas e prática clínica típica; não invente nomes de estudos, revistas, autores, números de pacientes ou dados que não decorram de consenso razoável.
+- Se o tema for ambíguo, apresente 2–3 leituras possíveis em uma linha cada e desenvolva a mais provável.
+- Estruture com: (1) tema em uma frase (2) pontos-chave clínicos (3) armadilhas ou alertas (4) o que residente costuma confundir — quando aplicável.
+- Limite: até ~900 palavras, texto corrido ou tópicos curtos.
+- Não escreva legenda de rede social nem hashtags; só contexto clínico-educativo.
+- Não cite concorrentes de cursinho (Medway, MedGrupo, etc.).`;
+
+  try {
+    const client = getClient();
+    const res = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.35,
+      max_tokens: 1400,
+      messages: [
+        { role: 'system', content: system },
+        {
+          role: 'user',
+          content: `Título ou contexto:\n"${caption.slice(0, 800)}"\n\nTexto-fonte:\n"${transcript.slice(0, 3500)}"`,
+        },
+      ],
+    });
+    const briefing = res.choices[0]?.message?.content?.trim() ?? '';
+    if (!briefing) return { transcript, caption, enriched: false };
+
+    const mergedTranscript = transcript
+      ? `${transcript}\n\n--- Contexto ampliado (IA; priorize o texto original em caso de divergência) ---\n\n${briefing}`
+      : briefing;
+
+    return { transcript: mergedTranscript, caption, enriched: true };
+  } catch {
+    return { transcript, caption, enriched: false };
+  }
+}
+
 /**
  * Calls GPT to generate tweet-style slide texts (no hashtags) and a separate
  * Instagram caption with hashtags, tailored for the medical residency persona.
@@ -411,7 +480,8 @@ RESPOSTA:
 - Frases curtas. Máximo 320 caracteres
 - Marque 2 a 4 termos clínicos-chave com ~til~ (ex: ~150mg IV~, ~10 minutos~) — esses ficam em laranja na tela
 - SEM asteriscos, SEM negrito, SEM markdown de formatação
-- Um emoji no máximo, só se ficar natural
+- Um emoji no máximo, só se ficar natural. Não tenha tom infantil ou infantilizante.
+- Escolha ser mais técnico e sóbrio
 - PROIBIDO mencionar: Medway, MedGrupo, Hardwork, Estratégia MED, Sanar, Jaleko
 
 LEGENDA:
@@ -510,6 +580,17 @@ function buildStoryBgLayers(backgroundUrl?: string, overlayColor?: string): stri
   return `<div style="position:absolute;inset:0;background:url('${backgroundUrl}') center/cover no-repeat;z-index:0;"></div><div style="position:absolute;inset:0;background:${ov};z-index:1;"></div>`;
 }
 
+export type StoryDragLayoutPct = {
+  stickerCenterX: number;
+  stickerCenterY: number;
+  answerCenterX: number;
+  answerCenterY: number;
+};
+
+function storyStickerWrapStyle(x: number, y: number): string {
+  return `position:absolute;left:${x}%;top:${y}%;transform:translate(-50%,-50%);z-index:3;max-width:92%;width:max-content;`;
+}
+
 export function buildStoryQuestionHtml(
   question: string,
   _mode: DisplayMode,
@@ -520,7 +601,10 @@ export function buildStoryQuestionHtml(
   _highlightColor = '#FF6B2B',
   stickerFontSize?: number,
   bgOptions?: { backgroundUrl?: string; overlayColor?: string },
+  layout?: Partial<Pick<StoryDragLayoutPct, 'stickerCenterX' | 'stickerCenterY'>>,
 ): string {
+  const sx = layout?.stickerCenterX ?? 50;
+  const sy = layout?.stickerCenterY ?? 18;
   const hasBg = Boolean(bgOptions?.backgroundUrl);
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -529,13 +613,13 @@ ${INTER_TAG}
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{width:1080px;height:1920px;overflow:hidden;background:#000;position:relative;}
-.content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;padding:200px 80px 80px;height:100%;}
+.content{position:absolute;inset:0;z-index:2;pointer-events:none;}
 ${STICKER_CSS}
 </style></head>
 <body>
 ${hasBg ? buildStoryBgLayers(bgOptions!.backgroundUrl, bgOptions!.overlayColor) : ''}
 <div class="content">
-${buildCaixinhaSticker(question, false, stickerFontSize)}
+<div style="${storyStickerWrapStyle(sx, sy)}">${buildCaixinhaSticker(question, false, stickerFontSize)}</div>
 </div>
 </body></html>`;
 }
@@ -552,9 +636,18 @@ export function buildStoryAnswerHtml(
   stickerFontSize?: number,
   answerFontSize?: number,
   bgOptions?: { backgroundUrl?: string; overlayColor?: string },
+  answerLineHeight?: number,
+  answerFillPadding?: number,
+  layout?: Partial<StoryDragLayoutPct>,
 ): string {
   const ff = FONT_MAP[font].family;
   const resolvedAnswerSize = answerFontSize ?? 44;
+  const resolvedLineHeight = answerLineHeight ?? 1.46;
+  const resolvedFillPadding = answerFillPadding ?? 0;
+  const sx = layout?.stickerCenterX ?? 50;
+  const sy = layout?.stickerCenterY ?? 18;
+  const ax = layout?.answerCenterX ?? 50;
+  const ay = layout?.answerCenterY ?? 52;
   const hasBg = Boolean(bgOptions?.backgroundUrl);
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -563,16 +656,16 @@ ${fontTag(font)}
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{width:1080px;height:1920px;overflow:hidden;background:#000;position:relative;}
-.content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;padding:200px 80px 80px;height:100%;}
+.content{position:absolute;inset:0;z-index:2;pointer-events:none;}
 ${STICKER_CSS}
-.sticker{margin-bottom:64px;}
-.answer{font-family:${ff};font-size:${resolvedAnswerSize}px;font-weight:400;line-height:1.35;width:100%;}
+.answer-wrap{max-width:920px;width:max-content;}
+.answer{font-family:${ff};font-size:${resolvedAnswerSize}px;font-weight:400;line-height:${resolvedLineHeight};width:100%;text-align:left;}
 .answer-text{
   color:${textColor};
   background:rgba(28,28,30,0.82);
   -webkit-box-decoration-break:clone;
   box-decoration-break:clone;
-  padding:6px 18px;
+  padding:${resolvedFillPadding}px 18px;
   border-radius:7px;
   display:inline;
 }
@@ -581,8 +674,10 @@ ${STICKER_CSS}
 <body>
 ${hasBg ? buildStoryBgLayers(bgOptions!.backgroundUrl, bgOptions!.overlayColor) : ''}
 <div class="content">
-${buildCaixinhaSticker(question, true, stickerFontSize)}
+<div style="${storyStickerWrapStyle(sx, sy)}">${buildCaixinhaSticker(question, true, stickerFontSize)}</div>
+<div class="answer-wrap" style="position:absolute;left:${ax}%;top:${ay}%;transform:translate(-50%,-50%);z-index:4;max-width:92%;">
 <div class="answer"><span class="answer-text">${escapeHtml(answer).replace(/~([^~]+)~/g, `<span>$1</span>`)}</span></div>
+</div>
 </div>
 </body></html>`;
 }

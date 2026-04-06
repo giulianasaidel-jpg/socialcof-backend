@@ -2,12 +2,10 @@ import archiver from 'archiver';
 import puppeteer from 'puppeteer';
 import type { Response } from 'express';
 
-const SLIDE_SIZE = 560;
+const DEFAULT_CSS_W = 1080;
+const DEFAULT_CSS_H = 1080;
 
-/**
- * Launches a single browser, renders each HTML to a PNG sequentially, then closes the browser.
- */
-async function renderSlides(htmls: string[]): Promise<Buffer[]> {
+async function renderSlides(htmls: string[], cssW = DEFAULT_CSS_W, cssH = DEFAULT_CSS_H): Promise<Buffer[]> {
   const browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -18,11 +16,11 @@ async function renderSlides(htmls: string[]): Promise<Buffer[]> {
 
     for (const html of htmls) {
       const page = await browser.newPage();
-      await page.setViewport({ width: SLIDE_SIZE, height: SLIDE_SIZE, deviceScaleFactor: 2 });
+      await page.setViewport({ width: cssW, height: cssH, deviceScaleFactor: 1 });
       await page.setContent(html, { waitUntil: 'networkidle0' });
       const screenshot = await page.screenshot({
         type: 'png',
-        clip: { x: 0, y: 0, width: SLIDE_SIZE, height: SLIDE_SIZE },
+        clip: { x: 0, y: 0, width: cssW, height: cssH },
       });
       await page.close();
       results.push(Buffer.from(screenshot));
@@ -34,15 +32,14 @@ async function renderSlides(htmls: string[]): Promise<Buffer[]> {
   }
 }
 
-/**
- * Renders all slideHtmls to PNGs and streams a ZIP archive directly to the HTTP response.
- */
 export async function streamSlidesAsZip(
   slideHtmls: string[],
   filename: string,
   res: Response,
+  cssW?: number,
+  cssH?: number,
 ): Promise<void> {
-  const pngs = await renderSlides(slideHtmls);
+  const pngs = await renderSlides(slideHtmls, cssW, cssH);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.zip"`);
@@ -57,15 +54,14 @@ export async function streamSlidesAsZip(
   await archive.finalize();
 }
 
-/**
- * Renders a single slideHtml to PNG and streams it to the HTTP response.
- */
 export async function streamSlideAsPng(
   html: string,
   filename: string,
   res: Response,
+  cssW?: number,
+  cssH?: number,
 ): Promise<void> {
-  const [png] = await renderSlides([html]);
+  const [png] = await renderSlides([html], cssW, cssH);
 
   res.setHeader('Content-Type', 'image/png');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.png"`);

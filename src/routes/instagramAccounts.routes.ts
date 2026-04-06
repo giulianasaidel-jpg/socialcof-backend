@@ -24,6 +24,8 @@ import {
   updateBrandColors,
   uploadReferenceImages,
   deleteReferenceImage,
+  uploadBrandPostImages,
+  deleteBrandPostImage,
 } from '../controllers/instagramAccounts.controller';
 import { uploadSingle, uploadMultiple } from '../middleware/upload';
 
@@ -54,5 +56,7 @@ router.post('/:id/branding/profile-pic', uploadSingle, uploadProfilePic);
 router.patch('/:id/branding/colors', updateBrandColors);
 router.post('/:id/branding/reference-images', uploadMultiple, uploadReferenceImages);
 router.delete('/:id/branding/reference-images', deleteReferenceImage);
+router.post('/:id/branding/post-images', uploadMultiple, uploadBrandPostImages);
+router.delete('/:id/branding/post-images', deleteBrandPostImage);
 
 export default router;

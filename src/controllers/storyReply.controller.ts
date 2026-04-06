@@ -9,13 +9,29 @@ import { TikTokPost } from '../models/TikTokPost';
 import { InstagramStory } from '../models/InstagramStory';
 import {
   generateStoryReply,
+  enrichSocialSourceIfThin,
   buildStoryQuestionHtml,
   buildStoryAnswerHtml,
+  type StoryDragLayoutPct,
 } from '../services/twitterPostGenerator';
 import { fetchWebBackgroundUrls, searchAlternateBackgroundUrls } from '../services/stockImageSearch';
 import { uploadBuffer } from '../services/s3';
 import { streamSlideAsPng } from '../services/slideExporter';
 import type { StoryReplyMode, StoryFont } from '../models/StoryReply';
+
+function clampStoryPct(v: unknown, fallback: number): number {
+  if (typeof v !== 'number' || Number.isNaN(v)) return fallback;
+  return Math.min(100, Math.max(0, v));
+}
+
+function layoutFromDoc(doc: InstanceType<typeof StoryReply>): StoryDragLayoutPct {
+  return {
+    stickerCenterX: doc.stickerCenterXPct ?? 50,
+    stickerCenterY: doc.stickerCenterYPct ?? 18,
+    answerCenterX: doc.answerCenterXPct ?? 50,
+    answerCenterY: doc.answerCenterYPct ?? 52,
+  };
+}
 
 function toResponse(doc: InstanceType<typeof StoryReply>) {
   return {
@@ -26,6 +42,12 @@ function toResponse(doc: InstanceType<typeof StoryReply>) {
     highlightColor: doc.highlightColor,
     stickerFontSize: doc.stickerFontSize,
     answerFontSize: doc.answerFontSize,
+    answerLineHeight: doc.answerLineHeight ?? 1.46,
+    answerFillPadding: doc.answerFillPadding ?? 0,
+    stickerCenterXPct: doc.stickerCenterXPct ?? 50,
+    stickerCenterYPct: doc.stickerCenterYPct ?? 18,
+    answerCenterXPct: doc.answerCenterXPct ?? 50,
+    answerCenterYPct: doc.answerCenterYPct ?? 52,
     question: doc.question,
     answer: doc.answer,
     questionHtml: doc.questionHtml,
@@ -60,8 +82,12 @@ function buildBgOptions(doc: InstanceType<typeof StoryReply>) {
 function rebuildHtmls(doc: InstanceType<typeof StoryReply>): void {
   const brandColors = doc.brandColors ?? [];
   const bg = buildBgOptions(doc);
-  doc.questionHtml = buildStoryQuestionHtml(doc.question, doc.mode, doc.profileName, brandColors, doc.font, doc.textColor, doc.highlightColor, doc.stickerFontSize, bg);
-  doc.answerHtml = buildStoryAnswerHtml(doc.question, doc.answer, doc.mode, doc.profileName, brandColors, doc.font, doc.textColor, doc.highlightColor, doc.stickerFontSize, doc.answerFontSize, bg);
+  const L = layoutFromDoc(doc);
+  doc.questionHtml = buildStoryQuestionHtml(doc.question, doc.mode, doc.profileName, brandColors, doc.font, doc.textColor, doc.highlightColor, doc.stickerFontSize, bg, {
+    stickerCenterX: L.stickerCenterX,
+    stickerCenterY: L.stickerCenterY,
+  });
+  doc.answerHtml = buildStoryAnswerHtml(doc.question, doc.answer, doc.mode, doc.profileName, brandColors, doc.font, doc.textColor, doc.highlightColor, doc.stickerFontSize, doc.answerFontSize, bg, doc.answerLineHeight, doc.answerFillPadding, L);
 }
 
 export async function listStoryReplies(req: Request, res: Response): Promise<void> {
@@ -100,9 +126,17 @@ export async function generateStoryReplyPost(req: Request, res: Response): Promi
     highlightColor = '#FF6B2B',
     stickerFontSize,
     answerFontSize,
+    answerLineHeight,
+    answerFillPadding,
     tone,
     backgroundUrl: manualBackgroundUrl,
     backgroundOverlayColor = 'rgba(0,0,0,0.65)',
+    brandPostImageIndex,
+    brandPostImageUrl,
+    stickerCenterXPct: bodyStickerCenterXPct,
+    stickerCenterYPct: bodyStickerCenterYPct,
+    answerCenterXPct: bodyAnswerCenterXPct,
+    answerCenterYPct: bodyAnswerCenterYPct,
   } = req.body as {
     accountId?: string;
     productId?: string;
@@ -120,9 +154,17 @@ export async function generateStoryReplyPost(req: Request, res: Response): Promi
     highlightColor?: string;
     stickerFontSize?: number;
     answerFontSize?: number;
+    answerLineHeight?: number;
+    answerFillPadding?: number;
     tone?: string;
     backgroundUrl?: string;
     backgroundOverlayColor?: string;
+    brandPostImageIndex?: number;
+    brandPostImageUrl?: string;
+    stickerCenterXPct?: number;
+    stickerCenterYPct?: number;
+    answerCenterXPct?: number;
+    answerCenterYPct?: number;
   };
 
   if (!accountId || !productId) {
@@ -194,6 +236,9 @@ export async function generateStoryReplyPost(req: Request, res: Response): Promi
     let caption = '';
 
     if (!question) {
+      const enriched = await enrichSocialSourceIfThin({ transcript: resolvedTranscript, caption: resolvedCaption });
+      resolvedTranscript = enriched.transcript;
+      resolvedCaption = enriched.caption;
       const generated = await generateStoryReply({
         transcript: resolvedTranscript,
         caption: resolvedCaption,
@@ -214,16 +259,36 @@ export async function generateStoryReplyPost(req: Request, res: Response): Promi
     let imageSearchQuery = '';
 
     if (!resolvedBgUrl) {
-      if (env.UNSPLASH_ACCESS_KEY) {
-        const web = await fetchWebBackgroundUrls(resolvedTranscript, resolvedCaption, 1, false);
-        resolvedBgUrl = web.urls[0] ?? '';
-        imageSearchQuery = web.query;
+      const postLib = account.brandPostImages ?? [];
+      const urlPick = typeof brandPostImageUrl === 'string' ? brandPostImageUrl.trim() : '';
+      if (urlPick && postLib.includes(urlPick)) resolvedBgUrl = urlPick;
+      else if (brandPostImageIndex !== undefined && Number.isInteger(brandPostImageIndex) && brandPostImageIndex >= 0 && brandPostImageIndex < postLib.length) {
+        resolvedBgUrl = (postLib[brandPostImageIndex] ?? '').trim();
       }
     }
 
+    if (!resolvedBgUrl && env.UNSPLASH_ACCESS_KEY) {
+      const web = await fetchWebBackgroundUrls(resolvedTranscript, resolvedCaption, 1, false);
+      resolvedBgUrl = web.urls[0] ?? '';
+      imageSearchQuery = web.query;
+    }
+
     const bgOptions = resolvedBgUrl ? { backgroundUrl: resolvedBgUrl, overlayColor: backgroundOverlayColor } : undefined;
-    const questionHtml = buildStoryQuestionHtml(question, mode, profileName, brandColors, font, textColor, highlightColor, stickerFontSize, bgOptions);
-    const answerHtml = buildStoryAnswerHtml(question, answer, mode, profileName, brandColors, font, textColor, highlightColor, stickerFontSize, answerFontSize, bgOptions);
+    const stickerCenterXPct = bodyStickerCenterXPct !== undefined ? clampStoryPct(bodyStickerCenterXPct, 50) : 50;
+    const stickerCenterYPct = bodyStickerCenterYPct !== undefined ? clampStoryPct(bodyStickerCenterYPct, 18) : 18;
+    const answerCenterXPct = bodyAnswerCenterXPct !== undefined ? clampStoryPct(bodyAnswerCenterXPct, 50) : 50;
+    const answerCenterYPct = bodyAnswerCenterYPct !== undefined ? clampStoryPct(bodyAnswerCenterYPct, 52) : 52;
+    const dragLayout: StoryDragLayoutPct = {
+      stickerCenterX: stickerCenterXPct,
+      stickerCenterY: stickerCenterYPct,
+      answerCenterX: answerCenterXPct,
+      answerCenterY: answerCenterYPct,
+    };
+    const questionHtml = buildStoryQuestionHtml(question, mode, profileName, brandColors, font, textColor, highlightColor, stickerFontSize, bgOptions, {
+      stickerCenterX: dragLayout.stickerCenterX,
+      stickerCenterY: dragLayout.stickerCenterY,
+    });
+    const answerHtml = buildStoryAnswerHtml(question, answer, mode, profileName, brandColors, font, textColor, highlightColor, stickerFontSize, answerFontSize, bgOptions, answerLineHeight, answerFillPadding, dragLayout);
 
     const doc = await StoryReply.create({
       accountId: account._id,
@@ -235,6 +300,12 @@ export async function generateStoryReplyPost(req: Request, res: Response): Promi
       highlightColor,
       stickerFontSize,
       answerFontSize,
+      answerLineHeight: answerLineHeight ?? 1.46,
+      answerFillPadding: answerFillPadding ?? 0,
+      stickerCenterXPct,
+      stickerCenterYPct,
+      answerCenterXPct,
+      answerCenterYPct,
       question,
       answer,
       questionHtml,
@@ -267,7 +338,7 @@ export async function updateStoryReply(req: Request, res: Response): Promise<voi
   const doc = await StoryReply.findById(req.params.id);
   if (!doc) { res.status(404).json({ message: 'StoryReply not found' }); return; }
 
-  const { question, answer, mode, font, textColor, highlightColor, stickerFontSize, answerFontSize, status, backgroundUrl, backgroundOverlayColor } = req.body as {
+  const { question, answer, mode, font, textColor, highlightColor, stickerFontSize, answerFontSize, answerLineHeight, answerFillPadding, status, backgroundUrl, backgroundOverlayColor, stickerCenterXPct, stickerCenterYPct, answerCenterXPct, answerCenterYPct } = req.body as {
     question?: string;
     answer?: string;
     mode?: StoryReplyMode;
@@ -276,9 +347,15 @@ export async function updateStoryReply(req: Request, res: Response): Promise<voi
     highlightColor?: string;
     stickerFontSize?: number;
     answerFontSize?: number;
+    answerLineHeight?: number;
+    answerFillPadding?: number;
     status?: string;
     backgroundUrl?: string;
     backgroundOverlayColor?: string;
+    stickerCenterXPct?: number;
+    stickerCenterYPct?: number;
+    answerCenterXPct?: number;
+    answerCenterYPct?: number;
   };
 
   if (question !== undefined) doc.question = question;
@@ -289,14 +366,23 @@ export async function updateStoryReply(req: Request, res: Response): Promise<voi
   if (highlightColor !== undefined) doc.highlightColor = highlightColor;
   if (stickerFontSize !== undefined) doc.stickerFontSize = stickerFontSize;
   if (answerFontSize !== undefined) doc.answerFontSize = answerFontSize;
+  if (answerLineHeight !== undefined) doc.answerLineHeight = answerLineHeight;
+  if (answerFillPadding !== undefined) doc.answerFillPadding = answerFillPadding;
   if (status !== undefined) doc.status = status as 'Rascunho' | 'Aprovado' | 'Publicado';
   if (backgroundUrl !== undefined) doc.backgroundUrl = backgroundUrl;
   if (backgroundOverlayColor !== undefined) doc.backgroundOverlayColor = backgroundOverlayColor;
+  if (stickerCenterXPct !== undefined) doc.stickerCenterXPct = clampStoryPct(stickerCenterXPct, doc.stickerCenterXPct ?? 50);
+  if (stickerCenterYPct !== undefined) doc.stickerCenterYPct = clampStoryPct(stickerCenterYPct, doc.stickerCenterYPct ?? 18);
+  if (answerCenterXPct !== undefined) doc.answerCenterXPct = clampStoryPct(answerCenterXPct, doc.answerCenterXPct ?? 50);
+  if (answerCenterYPct !== undefined) doc.answerCenterYPct = clampStoryPct(answerCenterYPct, doc.answerCenterYPct ?? 52);
 
   const contentChanged = question !== undefined || answer !== undefined || mode !== undefined
     || font !== undefined || textColor !== undefined || highlightColor !== undefined
     || stickerFontSize !== undefined || answerFontSize !== undefined
-    || backgroundUrl !== undefined || backgroundOverlayColor !== undefined;
+    || answerLineHeight !== undefined || answerFillPadding !== undefined
+    || backgroundUrl !== undefined || backgroundOverlayColor !== undefined
+    || stickerCenterXPct !== undefined || stickerCenterYPct !== undefined
+    || answerCenterXPct !== undefined || answerCenterYPct !== undefined;
   if (contentChanged) rebuildHtmls(doc);
 
   await doc.save();
@@ -353,7 +439,7 @@ export async function exportStoryQuestion(req: Request, res: Response): Promise<
   const doc = await StoryReply.findById(req.params.id);
   if (!doc) { res.status(404).json({ message: 'StoryReply not found' }); return; }
   try {
-    await streamSlideAsPng(doc.questionHtml, `story-question-${doc._id}`, res);
+    await streamSlideAsPng(doc.questionHtml, `story-question-${doc._id}`, res, 1080, 1920);
   } catch (err) {
     if (!res.headersSent) res.status(502).json({ message: 'Export failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }
@@ -363,7 +449,7 @@ export async function exportStoryAnswer(req: Request, res: Response): Promise<vo
   const doc = await StoryReply.findById(req.params.id);
   if (!doc) { res.status(404).json({ message: 'StoryReply not found' }); return; }
   try {
-    await streamSlideAsPng(doc.answerHtml, `story-answer-${doc._id}`, res);
+    await streamSlideAsPng(doc.answerHtml, `story-answer-${doc._id}`, res, 1080, 1920);
   } catch (err) {
     if (!res.headersSent) res.status(502).json({ message: 'Export failed', error: err instanceof Error ? err.message : 'Unknown error' });
   }

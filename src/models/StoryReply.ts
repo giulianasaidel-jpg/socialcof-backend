@@ -13,6 +13,12 @@ export interface IStoryReply extends Document {
   highlightColor: string;
   stickerFontSize: number;
   answerFontSize: number;
+  answerLineHeight: number;
+  answerFillPadding: number;
+  stickerCenterXPct: number;
+  stickerCenterYPct: number;
+  answerCenterXPct: number;
+  answerCenterYPct: number;
   question: string;
   answer: string;
   questionHtml: string;
@@ -50,6 +56,12 @@ const storyReplySchema = new Schema<IStoryReply>(
     highlightColor: { type: String, default: '#FF6B2B' },
     stickerFontSize: { type: Number, default: 42 },
     answerFontSize: { type: Number, default: 44 },
+    answerLineHeight: { type: Number, default: 1.46 },
+    answerFillPadding: { type: Number, default: 0 },
+    stickerCenterXPct: { type: Number, default: 50, min: 0, max: 100 },
+    stickerCenterYPct: { type: Number, default: 18, min: 0, max: 100 },
+    answerCenterXPct: { type: Number, default: 50, min: 0, max: 100 },
+    answerCenterYPct: { type: Number, default: 52, min: 0, max: 100 },
     question: { type: String, required: true },
     answer: { type: String, required: true },
     questionHtml: { type: String, required: true },
